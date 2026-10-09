@@ -5,8 +5,21 @@ LTX alpha-gen mattes everyone and can't be told who. This node lets SAM3 pick th
 
 ## Using it
 
-1. Add the **Selective Matte** node: double-click the canvas and type `selective`.
-2. Pick or upload the plate in `video`.
+1. Open `example_workflow.json` (video) or `example_sequence_workflow.json` (image sequence). Or wire it yourself:
+
+   | Plate | Wiring |
+   |---|---|
+   | **Video** | Load Video → Get Video Components → `images` + `fps` |
+   | **Image sequence** | **Load Plate Sequence** → `images` + `fps` + `first_frame` |
+
+   **Load Plate Sequence** reads a folder (`D:/plates/sh010`) or a pattern (`D:/plates/sh010/plate.####.exr` or `plate.%04d.exr`).
+   - Formats: PNG, JPG, TIF, EXR. EXR is treated as scene-linear and converted to sRGB.
+   - `first` and `last` set the frame range.
+   - Output frames keep the plate's numbers: `plate.1001` gives `alpha_01001`.
+
+   Any nodes can sit in between (crop, resize, colour). The node mattes whatever arrives at `images`.
+2. Click **Load plate** in the node. It runs the nodes feeding `images` and fills the scrubber.
+   Click it again whenever you change the crop or the clip. If the plate changes after you picked someone, the node warns you to re-detect.
 3. Scrub to a frame where the person is fully visible, then click **Detect people**.
 4. **Click the person** to matte. They turn orange. Everyone else is excluded automatically.
 5. Fix parts if needed, on any frame where the part is visible:
@@ -43,7 +56,14 @@ It is 16-bit PNG by default; set `format` to `exr` for half-float EXR.
 | flicker | Motion-compensated flicker, compared with LTX alone | ≤ 1.3x |
 | hair kept | Share of LTX's soft hair edge that survived | ≥ 95% |
 
-`⚙ Advanced` holds the model files, the chunk/stride/seed settings, the trimap erode/dilate, the near-people zone and the SAM3 threshold.
+**Models** are always visible on the node: LTX model, alpha-gen IC-LoRA, text encoder, video VAE, audio VAE, ViTMatte. Hover a model selector to see the recommended file and its folder.
+After you copy model files into the folders, press **R** in ComfyUI to refresh the lists. A missing model is reported by name when you queue.
+
+`⚙ Advanced` holds the chunk/stride/seed settings, the trimap erode/dilate, the near-people zone, the SAM3 threshold and `fast_attention`.
+
+**Speed.** `fast_attention` (on by default) runs LTX with Comfy Kitchen int8 attention, built into ComfyUI 0.38+.
+LTX sampling is about 36% faster. The matte changes by about 0.004 on edges, 7x less than changing the seed.
+Flicker and hair stay the same. On older ComfyUI the node falls back to standard attention.
 
 ## Install
 
@@ -62,7 +82,7 @@ git clone https://github.com/rik-python/ComfyUI-SelectiveMatte.git
 |---|---|
 | `ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors` | `models/diffusion_models` |
 | `ltx-2.5-22b-ic-lora-alpha-gen-0.9.safetensors` ([Lightricks/LTX-2.5-22b-IC-LoRA-Alpha-Gen](https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Alpha-Gen)) | `models/loras` |
-| `gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors` | `models/text_encoders` |
+| `gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors` (**optional**: the pack ships the empty-prompt conditioning, so `text encoder` defaults to built-in) | `models/text_encoders` |
 | `ltx-2.5-video-vae-conv-bf16.safetensors` (**conv** VAE; the diffusion VAE can't encode guides) | `models/vae` |
 | `ltx-2.5-audio-vae-bf16.safetensors` | `models/vae` |
 | ViTMatte `hustvl/vitmatte-base-composition-1k` (auto-downloads on the first run) | `models/vitmatte/` |

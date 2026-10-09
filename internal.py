@@ -15,7 +15,7 @@ import folder_paths
 from comfy_api.latest import io, ui
 
 from . import _engine as E
-from ._video import read_frames
+from . import _video as V
 
 CAT = "SelectiveMatte/internal"
 
@@ -35,45 +35,85 @@ def _opt(m):
 
 # ------------------------------------------------------------------ plate
 
+def plate_fingerprint(images):
+    """Cheap content hash of an IMAGE batch (shape + a strided sample of pixels)."""
+    import hashlib
+    t = images.detach()
+    sample = t[:, ::37, ::41, :].float().cpu().numpy()
+    return hashlib.sha1(repr(tuple(t.shape)).encode() + sample.tobytes()).hexdigest()[:16]
+
+
 class Plate(io.ComfyNode):
+    """Plate frames [start, start+count) of the connected images."""
+
     @classmethod
     def define_schema(cls):
         return _schema("SelectiveMatte_Plate",
-                       [io.String.Input("file"), io.Int.Input("start", default=0), io.Int.Input("count", default=0)],
+                       [io.Image.Input("images"), io.Int.Input("start", default=0), io.Int.Input("count", default=0)],
                        [io.Image.Output("plate")])
 
     @classmethod
-    def execute(cls, file, start, count):
-        frames = read_frames(folder_paths.get_annotated_filepath(file), start, count)
-        return io.NodeOutput(torch.from_numpy(frames).float() / 255.0)
+    def execute(cls, images, start, count):
+        return io.NodeOutput(images[start:start + count].float().clamp(0, 1))
 
 
 class LoadVideo(io.ComfyNode):
-    """VIDEO for SAM3 without the preview core LoadVideo would post onto the Selective Matte node."""
+    """VIDEO for SAM3's streaming tracker: the connected images encoded once into a cached proxy mp4."""
 
     @classmethod
     def define_schema(cls):
-        return _schema("SelectiveMatte_LoadVideo", [io.String.Input("file")], [io.Video.Output("video")])
+        return _schema("SelectiveMatte_LoadVideo", [io.Image.Input("images"), io.Float.Input("fps", default=24.0)],
+                       [io.Video.Output("video")])
 
     @classmethod
-    def execute(cls, file):
+    def execute(cls, images, fps):
         from comfy_api.latest import InputImpl
-        return io.NodeOutput(InputImpl.VideoFromFile(folder_paths.get_annotated_filepath(file)))
+        return io.NodeOutput(InputImpl.VideoFromFile(V.proxy_mp4(images, fps, plate_fingerprint(images))))
 
 
 class Frame(io.ComfyNode):
-    """One frame as IMAGE (for the picker's SAM3 detection / part preview)."""
+    """One frame of the connected images (for the picker's SAM3 detection / part preview)."""
 
     @classmethod
     def define_schema(cls):
-        return _schema("SelectiveMatte_Frame", [io.String.Input("file"), io.Int.Input("index", default=0)],
+        return _schema("SelectiveMatte_Frame", [io.Image.Input("images"), io.Int.Input("index", default=0)],
                        [io.Image.Output("image")])
 
     @classmethod
-    def execute(cls, file, index):
-        from ._video import read_frame
-        f = read_frame(folder_paths.get_annotated_filepath(file), index)
-        return io.NodeOutput(torch.from_numpy(f[None]).float() / 255.0)
+    def execute(cls, images, index):
+        i = max(0, min(index, images.shape[0] - 1))
+        return io.NodeOutput(images[i:i + 1].float().clamp(0, 1))
+
+
+class PlateProxy(io.ComfyNode):
+    """'Load plate' in the picker: small JPEGs of every frame of the connected images for scrubbing."""
+
+    @classmethod
+    def define_schema(cls):
+        return _schema("SelectiveMatte_PlateProxy", [io.Image.Input("images"), io.Int.Input("width", default=960),
+                                                     io.Int.Input("first_frame", default=1)],
+                       [], output_node=True)
+
+    @classmethod
+    def execute(cls, images, width, first_frame):
+        from PIL import Image
+
+        fp = plate_fingerprint(images)
+        n, h, w = images.shape[:3]
+        sub = os.path.join("selective_matte_plate", fp)
+        out_dir = os.path.join(folder_paths.get_temp_directory(), sub)
+        os.makedirs(out_dir, exist_ok=True)
+        size = (min(width, w), round(min(width, w) * h / w))
+        pbar = comfy.utils.ProgressBar(n)
+        for i in range(n):
+            path = os.path.join(out_dir, f"f{i:05d}.jpg")
+            if not os.path.isfile(path):
+                img = (images[i].float().clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
+                Image.fromarray(img).resize(size).save(path, quality=85)
+            pbar.update(1)
+        info = {"frames": int(n), "width": int(w), "height": int(h), "fingerprint": fp, "subfolder": sub.replace("\\", "/"),
+                "first_frame": int(first_frame)}
+        return io.NodeOutput(ui={"selective_matte_plate": [info]})
 
 
 class TrackMasks(io.ComfyNode):
@@ -106,6 +146,8 @@ class TrackMasks(io.ComfyNode):
                 m = m.amax(0)
             if m.numel() and m.max() > 1.0:
                 m = m / 255.0
+            if m.shape[0] in (height, height + 1) and m.shape[1] in (width, width + 1):
+                m = m[:height, :width]  # proxy mp4 padded odd sizes to even
             if m.shape != (height, width):
                 m = torch.nn.functional.interpolate(m[None, None], size=(height, width), mode="bilinear")[0, 0]
             out[t] = m.clamp(0, 1)
@@ -120,6 +162,25 @@ class MaskMax(io.ComfyNode):
     @classmethod
     def execute(cls, a, b):
         return io.NodeOutput(torch.maximum(a, b))
+
+
+# ------------------------------------------------------------------ text conditioning
+
+EMPTY_PROMPT = os.path.join(os.path.dirname(__file__), "data", "empty_prompt_ltx-2.5.safetensors")
+
+
+class EmptyPrompt(io.ComfyNode):
+    """Alpha-gen runs with an empty prompt, so its conditioning is a constant. It ships in data/ (encoded once with
+    the LTX-2.5 gemma4 text encoder), which skips loading the 13 GB text encoder on every machine."""
+
+    @classmethod
+    def define_schema(cls):
+        return _schema("SelectiveMatte_EmptyPrompt", [], [io.Conditioning.Output("conditioning")])
+
+    @classmethod
+    def execute(cls):
+        cond = comfy.utils.load_torch_file(EMPTY_PROMPT)["cond"]
+        return io.NodeOutput([[cond, {"pooled_output": None, "unprocessed_ltxav_embeds": True}]])
 
 
 # ------------------------------------------------------------------ selection + ViTMatte + stabilize
@@ -398,4 +459,4 @@ class PartReport(io.ComfyNode):
                                                           "mask": {"filename": name, "subfolder": sub, "type": "temp"}}]})
 
 
-NODES = [Plate, LoadVideo, Frame, TrackMasks, MaskMax, Refine, Isolate, ChunkPad, Stitch, Final, DetectReport, PartReport]
+NODES = [Plate, LoadVideo, Frame, PlateProxy, TrackMasks, MaskMax, EmptyPrompt, Refine, Isolate, ChunkPad, Stitch, Final, DetectReport, PartReport]

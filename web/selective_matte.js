@@ -10,7 +10,7 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 const NODE = "SelectiveMatte";
-const ADVANCED = ["ltx_model", "alpha_lora", "text_encoder", "video_vae", "audio_vae", "vitmatte", "chunk", "stride",
+const ADVANCED = ["chunk", "stride", "fast_attention",
     "seed", "control_after_generate", "erode", "dilate", "near_px", "stabilize_radius", "sam3_threshold"];
 const HIDDEN = ["picks", "render"];
 const COLORS = ["#4aa3ff", "#b07cff", "#3fd0c9", "#e6d94a", "#ff6fb5", "#8bd450", "#ff9d5c", "#9aa4b2"];
@@ -151,7 +151,7 @@ class Picker {
     constructor(node) {
         this.node = node;
         this.w = Object.fromEntries(node.widgets.map((w) => [w.name, w]));
-        this.info = null;          // {frames, fps, width, height}
+        this.info = null;          // plate proxy: {frames, width, height, fingerprint, subfolder, first_frame}
         this.frame = 0;
         this.img = null;           // current plate frame
         this.people = [];          // detections on picks.detect.frame: {id, box, area, mask, overlay}
@@ -161,7 +161,7 @@ class Picker {
         this.wipe = 0.5;
         this.picks = this.readPicks();
         this.build();
-        this.loadVideo(false);
+        this.restore();
     }
 
     readPicks() {
@@ -188,6 +188,9 @@ class Picker {
             t.dataset.k = k;
             this.tabs.appendChild(t);
         }
+        this.loadBtn = el("button", "sm-btn", "Load plate");
+        this.loadBtn.title = "Run the nodes feeding 'images' and show the plate here (again after changing crop/resize)";
+        this.loadBtn.onclick = () => this.loadPlate();
         this.detectBtn = el("button", "sm-btn primary", "Detect people");
         this.detectBtn.onclick = () => this.detect();
         const clear = el("button", "sm-btn ghost", "Clear picks");
@@ -199,7 +202,7 @@ class Picker {
         run.onclick = () => this.queue(false);
         this.advBtn = el("button", "sm-btn ghost", "⚙ Advanced");
         this.advBtn.onclick = () => this.toggleAdvanced();
-        bar.append(this.tabs, this.detectBtn, clear, this.previewBtn, run, this.advBtn);
+        bar.append(this.tabs, this.loadBtn, this.detectBtn, clear, this.previewBtn, run, this.advBtn);
 
         const view = el("div", "sm-view");
         this.canvas = el("canvas");
@@ -228,20 +231,64 @@ class Picker {
 
         HIDDEN.forEach((n) => hideWidget(this.w[n]));
         ADVANCED.forEach((n) => hideWidget(this.w[n]));
-        const cb = this.w.video.callback;
-        this.w.video.callback = (...a) => { const r = cb?.apply(this.w.video, a); this.loadVideo(true); return r; };
         this.fitNode();
         this.updateStatus();
     }
 
-    /** The upload combo makes the frontend add its own video player widget; the picker already shows the plate. */
-    dropVideoPreview() {
-        const i = this.node.widgets.findIndex((w) => w.name === "video-preview");
-        if (i < 0) return;
-        const [w] = this.node.widgets.splice(i, 1);
-        w.onRemove?.();
-        w.element?.remove();
-        this.fitNode();
+    /** Plate frame number of index i (first_frame, e.g. 1001 for VFX plates). */
+    num(i) { return (this.info?.first_frame ?? this.w.first_frame?.value ?? 1) + i; }
+
+    /** API prompt of everything feeding our `images` (and first_frame) input, plus that link. */
+    async upstream() {
+        const { output } = await app.graphToPrompt();
+        const me = output[String(this.node.id)];
+        if (!me) throw new Error("The Selective Matte node is muted or bypassed.");
+        const images = me.inputs.images;
+        if (!Array.isArray(images)) throw new Error("Connect the plate to the 'images' input first.");
+        const prompt = {};
+        const visit = (id) => {
+            if (prompt[id] || !output[id]) return;
+            prompt[id] = output[id];
+            for (const v of Object.values(output[id].inputs || {})) if (Array.isArray(v) && typeof v[0] === "string") visit(v[0]);
+        };
+        visit(images[0]);
+        const ff = me.inputs.first_frame;
+        if (Array.isArray(ff)) visit(ff[0]);
+        return { prompt, images, firstFrame: ff ?? 1 };
+    }
+
+    /** Run a helper graph on the CURRENT plate (upstream nodes are cached by ComfyUI, so this is quick). */
+    async helper(build, reportId, key) {
+        const up = await this.upstream();
+        return runHelper({ ...up.prompt, ...build(up.images, up.firstFrame) }, reportId, key);
+    }
+
+    async loadPlate() {
+        this.loadBtn.disabled = true;
+        this.loadBtn.textContent = "Loading…";
+        try {
+            const info = await this.helper((images, firstFrame) => ({
+                pp: { class_type: "SelectiveMatte_PlateProxy", inputs: { images, width: 960, first_frame: firstFrame } },
+            }), "pp", "selective_matte_plate");
+            const changed = this.picks.view && this.picks.view.fingerprint !== info.fingerprint;
+            this.info = info;
+            this.picks.view = info;
+            if (changed && this.picks.target) {
+                this.picks.stale = true;  // plate changed (crop/resize/new clip) after picking
+            } else if (changed) {
+                this.picks = { cuts: [], adds: [], others: [], view: info };
+                this.people = []; this.parts = {};
+            }
+            this.writePicks();
+            this.slider.max = info.frames - 1;
+            this.tab = "pick";
+            this.seek(Math.min(this.frame, info.frames - 1));
+        } catch (e) {
+            alert(`Selective Matte: could not load the plate\n${e.message}`);
+        } finally {
+            this.loadBtn.disabled = false;
+            this.loadBtn.textContent = "Load plate";
+        }
     }
 
     fitNode() {
@@ -266,7 +313,7 @@ class Picker {
             return c;
         };
         this.status.replaceChildren(
-            chip(TARGET, p.target ? `target #${p.target.id + 1} (frame ${p.target.frame + 1})` : "no target"),
+            chip(TARGET, p.target ? `target #${p.target.id + 1} (frame ${this.num(p.target.frame)})` : "no target"),
             chip(COLORS[0], `excluded people ${p.others.length}`),
             chip(CUT, `cuts ${p.cuts.length}`),
             chip(ADD, `adds ${p.adds.length}`),
@@ -275,20 +322,9 @@ class Picker {
     }
 
     // ------------------------------------------------------------ data
-    async loadVideo(reset) {
-        [0, 300, 1500].forEach((t) => setTimeout(() => this.dropVideoPreview(), t));
-        const name = this.w.video.value;
-        if (!name) return;
-        try {
-            const res = await api.fetchApi(`/selective_matte/info?video=${encodeURIComponent(name)}`);
-            if (!res.ok) throw new Error(await res.text());
-            this.info = await res.json();
-        } catch (e) { this.info = null; console.warn("[SelectiveMatte]", e); return; }
-        if (reset) {
-            this.picks = { cuts: [], adds: [], others: [] };
-            this.people = []; this.parts = {}; this.result = null; this.tab = "pick";
-            this.writePicks();
-        }
+    async restore() {
+        this.info = this.picks.view || null;
+        if (!this.info) return this.render();
         this.slider.max = this.info.frames - 1;
         await this.restoreDetections();
         this.seek(this.picks.target?.frame ?? this.picks.detect?.frame ?? 0);
@@ -318,13 +354,17 @@ class Picker {
         if (!this.info) return this.render();
         this.frame = Math.max(0, Math.min(f, this.info.frames - 1));
         this.slider.value = this.frame;
-        this.frameLabel.textContent = `frame ${this.frame + 1} / ${this.info.frames}`;
+        this.frameLabel.textContent = `frame ${this.num(this.frame)}  (${this.frame + 1} / ${this.info.frames})`;
         if (this.tab === "pick") {
             const want = this.frame;
             try {
-                const im = await loadImage(api.apiURL(`/selective_matte/frame?video=${encodeURIComponent(this.w.video.value)}&index=${want}`));
+                const name = `f${String(want).padStart(5, "0")}.jpg`;
+                const im = await loadImage(api.apiURL(`/view?filename=${name}&subfolder=${encodeURIComponent(this.info.subfolder)}&type=temp`));
                 if (want === this.frame) this.img = im;
-            } catch (e) { console.warn("[SelectiveMatte] frame load failed", e); }
+            } catch (e) {
+                this.img = null;  // temp proxies are cleared on restart
+                this.hint.textContent = "Click Load plate to show the plate.";
+            }
         }
         this.render();
     }
@@ -332,13 +372,13 @@ class Picker {
     /** SAM3 "person" detections on one frame (masks as overlays). Does not touch picks. */
     async detectOn(frame) {
         const token = Math.random().toString(36).slice(2, 10);
-        const out = await runHelper({
-            f: { class_type: "SelectiveMatte_Frame", inputs: { file: this.w.video.value, index: frame } },
+        const out = await this.helper((images) => ({
+            f: { class_type: "SelectiveMatte_Frame", inputs: { images, index: frame } },
             m: { class_type: "LoadSAM3Model", inputs: { precision: "auto" } },
             g: { class_type: "SAM3Grounding", inputs: { sam3_model_config: ["m", 0], image: ["f", 0], confidence_threshold: 0.3,
                                                        text_prompt: "person", max_detections: -1 } },
             r: { class_type: "SelectiveMatte_DetectReport", inputs: { masks: ["g", 0], frame, token } },
-        }, "r", "selective_matte_detect");
+        }), "r", "selective_matte_detect");
         const people = out.people.sort((a, b) => a.box[0] - b.box[0]).map((p, i) => ({ ...p, id: i }));
         for (const p of people) p.overlay = tintMask(await loadImage(viewUrl(p.mask)), COLORS[p.id % COLORS.length]);
         return people;
@@ -348,9 +388,11 @@ class Picker {
         this.detectBtn.disabled = true;
         this.detectBtn.textContent = "Detecting…";
         try {
+            if (!this.info) await this.loadPlate();
+            if (!this.info) return;
             const people = await this.detectOn(this.frame);
             this.framePeople = { [this.frame]: people };
-            this.picks = { cuts: this.picks.cuts, adds: this.picks.adds, others: [],
+            this.picks = { cuts: this.picks.cuts, adds: this.picks.adds, others: [], view: this.info,
                            detect: { frame: this.frame, people: people.map(({ overlay, ...p }) => p) } };
             this.people = people;
             this.writePicks();
@@ -401,7 +443,7 @@ class Picker {
             part.neg = negPeople.map((p) => interiorPoint(p.overlay, x, y)).filter(Boolean);
 
             const n = {
-                f: { class_type: "SelectiveMatte_Frame", inputs: { file: this.w.video.value, index: part.frame } },
+                f: { class_type: "SelectiveMatte_Frame", inputs: { images: null, index: part.frame } },
                 m: { class_type: "LoadSAM3Model", inputs: { precision: "auto" } },
                 p1: { class_type: "SAM3CreatePoint", inputs: { x, y, is_foreground: true } },
                 c: { class_type: "SAM3CombinePoints", inputs: { point_1: ["p1", 0] } },
@@ -417,7 +459,10 @@ class Picker {
                 n.cn = { class_type: "SAM3CombinePoints", inputs: negInputs };
                 n.s.inputs.negative_points = ["cn", 0];
             }
-            const out = await runHelper(n, "r", "selective_matte_part");
+            const out = await this.helper((images) => {
+                n.f.inputs.images = images;
+                return n;
+            }, "r", "selective_matte_part");
             part.mask = out.mask;
             const ov = tintMask(await loadImage(viewUrl(out.mask)), kind === "cuts" ? CUT : ADD);
             this.parts[token] = ov;
@@ -438,6 +483,7 @@ class Picker {
 
     async queue(preview) {
         if (!this.picks.target) { alert("Selective Matte: click 'Detect people', then click the person to matte."); return; }
+        if (this.picks.stale && !confirm("The plate changed after you picked the subject. Run anyway?")) return;
         const r = this.w.render;
         r.value = preview ? "preview chunk" : "full shot";
         try { await app.queuePrompt(0, 1); }
@@ -469,7 +515,7 @@ class Picker {
     pickPerson(x, y) {
         const d = this.picks.detect;
         if (!d || d.frame !== this.frame) {
-            alert(d ? `Detections are on frame ${d.frame + 1}. Scrub there, or Detect people on this frame.` : "Click 'Detect people' first.");
+            alert(d ? `Detections are on frame ${this.num(d.frame)}. Scrub there, or Detect people on this frame.` : "Click 'Detect people' first.");
             return;
         }
         // Smallest person whose mask (or box) contains the click: front-most when people overlap.
@@ -484,6 +530,8 @@ class Picker {
         if (!hits.length) return;
         const t = hits[0];
         this.picks.target = { id: t.id, frame: d.frame, box: t.box };
+        this.picks.plate = this.info?.fingerprint;
+        delete this.picks.stale;
         // Only people near the target need painting out; far ones are dropped later by connectivity anyway,
         // and every excluded person costs one SAM3 track.
         const [tx, ty, tw, th] = t.box, gx = tw * 0.65, gy = th * 0.65;
@@ -554,11 +602,12 @@ class Picker {
             }
         }
         const warn = [...this.picks.cuts, ...this.picks.adds].find((p) => p.warning);
-        this.hint.style.background = warn ? "#7a1f1fdd" : "";
+        this.hint.style.background = warn || this.picks.stale ? "#7a1f1fdd" : "";
         this.hint.textContent = warn ? `⚠ ${warn.warning}`
-            : !this.info ? "Upload or choose a video above."
+            : this.picks.stale ? "⚠ The plate changed (crop/resize/new clip) after picking: Detect people again."
+            : !this.info ? "Connect the plate to 'images', then click Load plate."
             : !d ? "Scrub to a frame where the person is fully visible, then click Detect people."
-            : !onDetect ? `Detections live on frame ${d.frame + 1}. Cuts/adds can go on any frame (place them where the part first appears).`
+            : !onDetect ? `Detections live on frame ${this.num(d.frame)}. Cuts/adds can go on any frame (place them where the part first appears).`
             : !this.picks.target ? "Click the person to matte. Every other detected person is excluded."
             : "Alt-click: cut a part (someone else's hand).  Shift-click: add a part (own hand).  Ctrl-click: remove.";
     }
@@ -568,8 +617,8 @@ class Picker {
         const r = this.imageRect();
         if (!res || !res.previews.length) { this.hint.textContent = "Run Preview chunk or the full shot to see the result here."; return; }
         const items = res.previews;
-        const first = res.info.first_frame - 1;
-        // nearest preview to the scrubber frame
+        const first = res.info.first_frame - (this.info?.first_frame ?? 1);
+        // nearest preview to the scrubber frame (first is the processed range's index offset)
         let it = items[0];
         for (const x of items) if (Math.abs(first + x.frame - this.frame) < Math.abs(first + it.frame - this.frame)) it = x;
         const key = res.view === "alpha" ? "alpha" : "comp";
@@ -611,7 +660,7 @@ class Picker {
         tog.onclick = () => { this.result.view = this.result.view === "alpha" ? "comp" : "alpha"; this.render(); };
         kids.push(tog);
         this.qc.replaceChildren(...kids);
-        this.seek(info.first_frame - 1);
+        this.seek(info.first_frame - (this.info?.first_frame ?? 1));
     }
 }
 
@@ -652,7 +701,10 @@ app.registerExtension({
                     if (w.name in named && w.name !== "selective_matte_ui" && w.name !== "upload") w.value = named[w.name];
                 }
             }
-            if (this.smPicker) { this.smPicker.picks = this.smPicker.readPicks(); this.smPicker.loadVideo(false); }
+            if (this.smPicker) {
+                this.smPicker.picks = this.smPicker.readPicks();
+                this.smPicker.restore();
+            }
             return r;
         };
         const executed = nodeType.prototype.onExecuted;

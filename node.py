@@ -12,23 +12,49 @@ from comfy_api.latest import io
 from comfy_execution.graph_utils import GraphBuilder
 
 from . import _engine as E
-from ._video import probe
+from .internal import plate_fingerprint
 
+NONE = "(none found)"
+BUILTIN = "built-in empty prompt (no text encoder needed)"
+# widget -> (models folder, preferred file, where to get it): shown as tooltips and in "missing model" errors
+MODELS = {
+    "ltx_model": ("diffusion_models", "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors"),
+    "alpha_lora": ("loras", "ltx-2.5-22b-ic-lora-alpha-gen-0.9.safetensors"),
+    "text_encoder": ("text_encoders", "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors"),
+    "video_vae": ("vae", "ltx-2.5-video-vae-conv-bf16.safetensors"),
+    "audio_vae": ("vae", "ltx-2.5-audio-vae-bf16.safetensors"),
+}
 QUALITY = ["Best (v12, 2 LTX passes)", "Fast (v7, 1 LTX pass)"]
 RENDER = ["full shot", "preview chunk"]
 SIGMAS = "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
 
 
-def _video_files():
-    d = folder_paths.get_input_directory()
-    files = [f for f in os.listdir(d) if os.path.isfile(os.path.join(d, f))]
-    return sorted(folder_paths.filter_files_content_types(files, ["video"]))
-
-
-def _models(kind, prefer):
+def _models(widget):
+    """Files in the widget's models folder, the recommended one first. Re-read every time the node definitions
+    are fetched, so after dropping a model in the folder, pressing R (refresh) in ComfyUI lists it."""
+    kind, prefer = MODELS[widget]
     names = folder_paths.get_filename_list(kind)
-    best = next((n for n in names if prefer in n.replace("\\", "/").split("/")[-1]), None)
-    return ([best] if best else []) + [n for n in names if n != best] or ["(none found)"]
+    best = next((n for n in names if n.replace("\\", "/").split("/")[-1] == prefer), None)
+    best = best or next((n for n in names if prefer.rsplit("-", 1)[0] in n), None)
+    return ([best] if best else []) + [n for n in names if n != best] or [NONE]
+
+
+def _model_input(widget, label):
+    kind, prefer = MODELS[widget]
+    tip = f"Recommended: {prefer} | folder: ComfyUI/models/{kind}/ (press R after adding files)"
+    if widget == "text_encoder":
+        # Alpha-gen uses an empty prompt; its conditioning ships with the pack, so the encoder is optional.
+        files = [n for n in _models(widget) if n != NONE]
+        return io.Combo.Input(widget, options=[BUILTIN] + files, default=BUILTIN, display_name=label, tooltip=(
+            f"{BUILTIN}: same result, skips loading the 13 GB encoder. Or pick {prefer} from ComfyUI/models/{kind}/"))
+    return io.Combo.Input(widget, options=_models(widget), display_name=label, tooltip=tip)
+
+
+def _kitchen_attention():
+    """Core 'Model Attention Backend' node with the Comfy Kitchen int8 kernel (ComfyUI 0.38+, Nvidia/AMD)."""
+    import nodes
+    import comfy.ldm.modules.attention as attn
+    return "ModelAttentionBackend" in nodes.NODE_CLASS_MAPPINGS and getattr(attn, "COMFY_KITCHEN_INT8_ATTENTION_IS_AVAILABLE", False)
 
 
 def _vitmatte_options():
@@ -52,20 +78,28 @@ class SelectiveMatte(io.ComfyNode):
             enable_expand=True,
             is_output_node=True,
             inputs=[
-                io.Combo.Input("video", options=_video_files(), upload=io.UploadType.video),
+                io.Image.Input("images", tooltip=(
+                    "The plate. Connect Load Video -> Get Video Components, Load Plate Sequence, or any crop/resize "
+                    "chain. Then click 'Load plate' in the node.")),
+                io.Float.Input("fps", default=24.0, min=1.0, max=240.0, step=0.001,
+                               tooltip="Plate frame rate (connect Get Video Components / Load Plate Sequence fps)"),
+                io.Int.Input("first_frame", default=1, min=0, max=10**7,
+                             tooltip="Frame number of the first image (1001 for VFX plates): output files use it"),
                 io.Combo.Input("quality", options=QUALITY, default=QUALITY[0]),
                 io.Combo.Input("render", options=RENDER, default=RENDER[0],
                                tooltip="preview chunk = first 49 frames from the pick frame"),
                 io.String.Input("picks", default="{}", multiline=False, tooltip="Set by the picker; JSON."),
                 io.String.Input("filename_prefix", default="selective_matte/shot"),
                 io.Combo.Input("format", options=["png16", "exr"], default="png16"),
+                # models (always visible)
+                _model_input("ltx_model", "LTX-2.5 model"),
+                _model_input("alpha_lora", "alpha-gen IC-LoRA"),
+                _model_input("text_encoder", "text encoder"),
+                _model_input("video_vae", "video VAE (conv)"),
+                _model_input("audio_vae", "audio VAE"),
+                io.Combo.Input("vitmatte", options=_vitmatte_options(), display_name="ViTMatte",
+                               tooltip="Folder in ComfyUI/models/vitmatte/, or auto-download on first run"),
                 # advanced
-                io.Combo.Input("ltx_model", options=_models("diffusion_models", "ltx-2.5-22b-distilled-transformer-comfy-int8")),
-                io.Combo.Input("alpha_lora", options=_models("loras", "ic-lora-alpha-gen")),
-                io.Combo.Input("text_encoder", options=_models("text_encoders", "gemma4-12b-with-proj-ltx-2.5-comfy-int8")),
-                io.Combo.Input("video_vae", options=_models("vae", "ltx-2.5-video-vae-conv")),
-                io.Combo.Input("audio_vae", options=_models("vae", "ltx-2.5-audio-vae")),
-                io.Combo.Input("vitmatte", options=_vitmatte_options()),
                 io.Int.Input("chunk", default=49, min=9, max=145, step=8, tooltip="LTX frames per render (8n+1)"),
                 io.Int.Input("stride", default=40, min=1, max=144),
                 io.Int.Input("seed", default=42, min=0, max=2**31 - 1, control_after_generate=False),
@@ -73,12 +107,20 @@ class SelectiveMatte(io.ComfyNode):
                 io.Int.Input("near_px", default=15, min=1, max=64, tooltip="v7 zone around other people (Best)"),
                 io.Int.Input("stabilize_radius", default=2, min=0, max=6),
                 io.Float.Input("sam3_threshold", default=0.3, min=0.0, max=1.0, step=0.01),
+                io.Boolean.Input("fast_attention", default=True, tooltip=(
+                    "Comfy Kitchen int8 attention for LTX: about 36% faster sampling, matte difference ~0.004 "
+                    "(7x smaller than changing the seed). Turn off to use standard PyTorch attention.")),
             ],
             outputs=[io.Mask.Output("alpha"), io.Image.Output("comp")],
+            hidden=[io.Hidden.unique_id, io.Hidden.dynprompt],
         )
 
     @classmethod
     def validate_inputs(cls, picks, **kw):
+        missing = [f"{w}: put {prefer} in ComfyUI/models/{kind}/ then press R"
+                   for w, (kind, prefer) in MODELS.items() if kw.get(w) == NONE]
+        if missing:
+            return "Missing model(s): " + "; ".join(missing)
         try:
             p = json.loads(picks or "{}")
         except ValueError:
@@ -88,12 +130,15 @@ class SelectiveMatte(io.ComfyNode):
         return True
 
     @classmethod
-    def execute(cls, video, quality, render, picks, filename_prefix, format, ltx_model, alpha_lora, text_encoder,
+    def execute(cls, images, fps, first_frame, quality, render, picks, filename_prefix, format, ltx_model, alpha_lora, text_encoder,
                 video_vae, audio_vae, vitmatte, chunk, stride, seed, erode, dilate, near_px, stabilize_radius,
-                sam3_threshold):
+                sam3_threshold, fast_attention=True):
         p = json.loads(picks)
-        info = probe(folder_paths.get_annotated_filepath(video))
-        n_video, fps, W, H = info["frames"], info["fps"], info["width"], info["height"]
+        n_video, H, W = images.shape[:3]
+        # Sub-nodes link straight to whatever feeds our `images` input (no copy of the batch).
+        src = cls.hidden.dynprompt.get_node(cls.hidden.unique_id)["inputs"]["images"]
+        if p.get("plate") and p["plate"] != plate_fingerprint(images):
+            print("[SelectiveMatte] warning: the plate changed since the subject was picked; picks may be off")
         start = int(p["target"]["frame"])
         count = n_video - start
         L = min(chunk, E.ltx_frames(count) if count >= chunk else 8 * math.ceil((count - 1) / 8) + 1)
@@ -106,7 +151,7 @@ class SelectiveMatte(io.ComfyNode):
         prefix = filename_prefix + ("_preview" if render == RENDER[1] else "")
 
         g = GraphBuilder()
-        vid = g.node("SelectiveMatte_LoadVideo", file=video)
+        vid = g.node("SelectiveMatte_LoadVideo", images=src, fps=fps)
         sam = g.node("LoadSAM3Model", precision="auto")
 
         last = start + count - 1
@@ -147,7 +192,7 @@ class SelectiveMatte(io.ComfyNode):
         refine_kw = {k: v for k, v in (("adds", union([point_track(a) for a in in_range(p.get("adds", []))])),
                                        ("cuts", union([point_track(c) for c in in_range(p.get("cuts", []))])),
                                        ("others", union([box_track(o) for o in in_range(p.get("others", []))]))) if v is not None}
-        plate = g.node("SelectiveMatte_Plate", file=video, start=start, count=count)
+        plate = g.node("SelectiveMatte_Plate", images=src, start=start, count=count)
         ref = g.node("SelectiveMatte_Refine", plate=plate.out(0), target=target, vitmatte=vitmatte,
                      erode=erode, dilate=dilate, radius=stabilize_radius, **refine_kw)
         sel, refined, others = ref.out(0), ref.out(1), ref.out(2)
@@ -155,9 +200,19 @@ class SelectiveMatte(io.ComfyNode):
         # LTX-2.5 alpha-gen stack, settings from kids_ltx_alphagen_1920_49f_API.json
         unet = g.node("UNETLoader", unet_name=ltx_model, weight_dtype="default")
         lora = g.node("LTXICLoRALoaderModelOnly", model=unet.out(0), lora_name=alpha_lora, strength_model=1.0)
-        clip = g.node("CLIPLoader", clip_name=text_encoder, type="ltxv")
-        cond = g.node("LTXVConditioning", positive=g.node("CLIPTextEncode", clip=clip.out(0), text="").out(0),
-                      negative=g.node("CLIPTextEncode", clip=clip.out(0), text="").out(0), frame_rate=fps)
+        model = lora.out(0)
+        if fast_attention:
+            if _kitchen_attention():
+                model = g.node("ModelAttentionBackend", model=model, attention="comfy kitchen attention").out(0)
+            else:
+                print("[SelectiveMatte] Comfy Kitchen attention unavailable (update ComfyUI); using PyTorch attention")
+        if text_encoder == BUILTIN:
+            empty = g.node("SelectiveMatte_EmptyPrompt").out(0)
+            cond = g.node("LTXVConditioning", positive=empty, negative=empty, frame_rate=fps)
+        else:
+            clip = g.node("CLIPLoader", clip_name=text_encoder, type="ltxv")
+            cond = g.node("LTXVConditioning", positive=g.node("CLIPTextEncode", clip=clip.out(0), text="").out(0),
+                          negative=g.node("CLIPTextEncode", clip=clip.out(0), text="").out(0), frame_rate=fps)
         vae = g.node("VAELoader", vae_name=video_vae)
         avae = g.node("VAELoader", vae_name=audio_vae)
         latent = g.node("EmptyLTXVLatentVideo", width=W + (-W) % 32, height=H + (-H) % 32, length=L, batch_size=1)
@@ -176,7 +231,7 @@ class SelectiveMatte(io.ComfyNode):
                                latent_downscale_factor=lora.out(1), crop="disabled", use_tiled_encode=False,
                                tile_size=256, tile_overlap=64)
                 av = g.node("LTXVConcatAVLatent", video_latent=guide.out(2), audio_latent=alat.out(0))
-                guider = g.node("CFGGuider", model=lora.out(0), positive=guide.out(0), negative=guide.out(1), cfg=1.0)
+                guider = g.node("CFGGuider", model=model, positive=guide.out(0), negative=guide.out(1), cfg=1.0)
                 samp = g.node("SamplerCustomAdvanced", noise=noise.out(0), guider=guider.out(0), sampler=sampler.out(0),
                               sigmas=sigmas.out(0), latent_image=av.out(0))
                 sep = g.node("LTXVSeparateAVLatent", av_latent=samp.out(0))
@@ -193,5 +248,5 @@ class SelectiveMatte(io.ComfyNode):
             final_kw["ltx_isolated"] = ltx_pass(iso.out(0))
         final = g.node("SelectiveMatte_Final", plate=plate.out(0), ltx=ltx, selection=sel, refined=refined,
                        others=others, near_px=near_px, filename_prefix=prefix, format=format,
-                       first_frame=start + 1, save=True, qc=True, **final_kw)
+                       first_frame=first_frame + start, save=True, qc=True, **final_kw)
         return io.NodeOutput(final.out(0), final.out(1), expand=g.finalize())
