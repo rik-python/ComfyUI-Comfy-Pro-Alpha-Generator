@@ -49,7 +49,7 @@ It is 16-bit PNG by default; set `format` to `exr` for half-float EXR.
 
 **1. Clone into `ComfyUI/custom_nodes`:**
 ```
-git clone <repo-url> ComfyUI-SelectiveMatte
+git clone https://github.com/rik-python/ComfyUI-SelectiveMatte.git
 ```
 
 **2. Required node packs** (ComfyUI Manager can install both):

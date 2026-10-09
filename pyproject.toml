@@ -7,7 +7,7 @@ requires-python = ">=3.10"
 dependencies = ["opencv-python-headless", "transformers", "huggingface_hub", "av"]
 
 [project.urls]
-Repository = "https://github.com/rikinpatel/ComfyUI-SelectiveMatte"
+Repository = "https://github.com/rik-python/ComfyUI-SelectiveMatte"
 
 [tool.comfy]
 PublisherId = "rikinpatel"
