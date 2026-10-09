@@ -327,7 +327,9 @@ class Picker {
             return c;
         };
         this.status.replaceChildren(
-            chip(TARGET, p.target ? `target #${p.target.id + 1} (frame ${this.num(p.target.frame)})` : "no target"),
+            chip(TARGET, !p.target ? "no target"
+                : p.target.box ? `target #${p.target.id + 1} (frame ${this.num(p.target.frame)})`
+                : `target: clicked object (frame ${this.num(p.target.frame)})`),
             chip(COLORS[0], `excluded ${p.others.length}`),
             chip(CUT, `cuts ${p.cuts.length}`),
             chip(ADD, `adds ${p.adds.length}`),
@@ -347,7 +349,7 @@ class Picker {
     async restoreDetections() {
         const d = this.picks.detect;
         this.subjects = [];
-        if (!d) return;
+        if (!d) return this.restoreParts();
         for (const saved of d.subjects || d.people || []) {  // `people`: picks saved before any-subject detection
             const p = { ...saved };  // overlays stay out of the picks JSON (pixel arrays would bloat the workflow)
             try { p.overlay = tintMask(await loadImage(viewUrl(p.mask)), COLORS[p.id % COLORS.length]); }
@@ -355,6 +357,15 @@ class Picker {
             this.subjects.push(p);
         }
         this.frameSubjects = { [d.frame]: this.subjects };
+        await this.restoreParts();
+    }
+
+    /** Mask overlays of a clicked target and of cuts/adds (temp files: gone after a ComfyUI restart). */
+    async restoreParts() {
+        const t = this.picks.target;
+        if (t && !t.box && t.mask) {
+            try { this.parts[t.token] = tintMask(await loadImage(viewUrl(t.mask)), TARGET); } catch { /* gone */ }
+        }
         for (const [kind, color] of [["cuts", CUT], ["adds", ADD]]) {
             for (const part of this.picks[kind]) {
                 if (!part.mask) continue;
@@ -408,7 +419,8 @@ class Picker {
         return subjects;
     }
 
-    async detect() {
+    /** quiet: auto-detect on a click (no alert when nothing is found). */
+    async detect(quiet = false) {
         this.detectBtn.disabled = true;
         this.detectBtn.textContent = "Detecting…";
         try {
@@ -417,7 +429,10 @@ class Picker {
             const prompt = this.promptText();
             this.promptBox.value = prompt;
             const subjects = await this.detectOn(this.frame, prompt);
-            if (!subjects.length) { alert(`Selective Matte: no "${prompt}" found on this frame. Try another word or frame.`); return; }
+            if (!subjects.length) {
+                if (!quiet) alert(`Selective Matte: no "${prompt}" found on this frame. Try another word or frame.`);
+                return;
+            }
             this.frameSubjects = { [this.frame]: subjects };
             this.picks = { cuts: this.picks.cuts, adds: this.picks.adds, others: [], view: this.info, prompt,
                            detect: { frame: this.frame, prompt, subjects: subjects.map(({ overlay, ...p }) => p) } };
@@ -441,7 +456,9 @@ class Picker {
         const subjects = this.frameSubjects[frame];
         const t = this.picks.target;
         let target = null;
-        if (t) {
+        if (t && !t.box) {  // clicked target (no detection): its own mask, only on its frame
+            target = frame === t.frame && this.parts[t.token] ? { overlay: this.parts[t.token] } : null;
+        } else if (t) {
             if (frame === t.frame) target = subjects.find((p) => p.id === t.id) || null;
             if (!target) {
                 const cost = (p) => Math.hypot(p.box[0] - t.box[0], p.box[1] - t.box[1]) + Math.abs(p.box[3] - t.box[3]);
@@ -449,6 +466,31 @@ class Picker {
             }
         }
         return { subjects, target };
+    }
+
+    /** SAM3 point segmentation of one click on one frame (single-frame mask preview). Resolves {mask}. */
+    segmentPoint(frame, x, y, neg, token) {
+        const n = {
+            f: { class_type: "SelectiveMatte_Frame", inputs: { images: null, index: frame } },
+            m: { class_type: "LoadSAM3Model", inputs: { precision: "auto" } },
+            p1: { class_type: "SAM3CreatePoint", inputs: { x, y, is_foreground: true } },
+            c: { class_type: "SAM3CombinePoints", inputs: { point_1: ["p1", 0] } },
+            s: { class_type: "SAM3Segmentation", inputs: { sam3_model_config: ["m", 0], image: ["f", 0], positive_points: ["c", 0] } },
+            r: { class_type: "SelectiveMatte_PartReport", inputs: { mask: ["s", 0], token } },
+        };
+        if (neg.length) {
+            const negInputs = {};
+            neg.forEach(([nx, ny], i) => {
+                n[`n${i}`] = { class_type: "SAM3CreatePoint", inputs: { x: nx, y: ny, is_foreground: false } };
+                negInputs[`point_${i + 1}`] = [`n${i}`, 0];
+            });
+            n.cn = { class_type: "SAM3CombinePoints", inputs: negInputs };
+            n.s.inputs.negative_points = ["cn", 0];
+        }
+        return this.helper((images) => {
+            n.f.inputs.images = images;
+            return n;
+        }, "r", "selective_matte_part");
     }
 
     async addPart(kind, x, y) {
@@ -469,27 +511,7 @@ class Picker {
             const negSubjects = kind === "adds" ? subjects.filter((p) => p !== target && near(p)) : (target ? [target] : []);
             part.neg = negSubjects.map((p) => interiorPoint(p.overlay, x, y)).filter(Boolean);
 
-            const n = {
-                f: { class_type: "SelectiveMatte_Frame", inputs: { images: null, index: part.frame } },
-                m: { class_type: "LoadSAM3Model", inputs: { precision: "auto" } },
-                p1: { class_type: "SAM3CreatePoint", inputs: { x, y, is_foreground: true } },
-                c: { class_type: "SAM3CombinePoints", inputs: { point_1: ["p1", 0] } },
-                s: { class_type: "SAM3Segmentation", inputs: { sam3_model_config: ["m", 0], image: ["f", 0], positive_points: ["c", 0] } },
-                r: { class_type: "SelectiveMatte_PartReport", inputs: { mask: ["s", 0], token } },
-            };
-            if (part.neg.length) {
-                const negInputs = {};
-                part.neg.forEach(([nx, ny], i) => {
-                    n[`n${i}`] = { class_type: "SAM3CreatePoint", inputs: { x: nx, y: ny, is_foreground: false } };
-                    negInputs[`point_${i + 1}`] = [`n${i}`, 0];
-                });
-                n.cn = { class_type: "SAM3CombinePoints", inputs: negInputs };
-                n.s.inputs.negative_points = ["cn", 0];
-            }
-            const out = await this.helper((images) => {
-                n.f.inputs.images = images;
-                return n;
-            }, "r", "selective_matte_part");
+            const out = await this.segmentPoint(part.frame, x, y, part.neg, token);
             part.mask = out.mask;
             const ov = tintMask(await loadImage(viewUrl(out.mask)), kind === "cuts" ? CUT : ADD);
             this.parts[token] = ov;
@@ -509,7 +531,7 @@ class Picker {
     }
 
     async queue(preview) {
-        if (!this.picks.target) { alert("Selective Matte: click 'Detect', then click the subject to matte."); return; }
+        if (!this.picks.target) { alert("Selective Matte: click the subject to matte (anything in the plate, or a detection after Detect)."); return; }
         if (this.picks.stale && !confirm("The plate changed after you picked the subject. Run anyway?")) return;
         const r = this.w.render;
         r.value = preview ? "preview chunk" : "full shot";
@@ -539,11 +561,15 @@ class Picker {
         this.pickSubject(x, y);
     }
 
-    pickSubject(x, y) {
-        const d = this.picks.detect;
+    async pickSubject(x, y) {
+        if (!this.info) return;
+        let d = this.picks.detect;
         if (!d || d.frame !== this.frame) {
-            alert(d ? `Detections are on frame ${this.num(d.frame)}. Scrub there, or Detect on this frame.` : "Type what to find, then click 'Detect' first.");
-            return;
+            // First click on this frame: detect (box prompt, "person" by default) so the click can land on a detection
+            // and everything else detected gets excluded, also when the clicked thing is not a detection.
+            await this.detect(true);
+            d = this.picks.detect;
+            if (!d || d.frame !== this.frame) return this.pickPoint(x, y);
         }
         // Smallest detection whose mask (or box) contains the click: front-most when detections overlap.
         const hits = this.subjects.filter((p) => {
@@ -554,7 +580,7 @@ class Picker {
             const [cx, cy, w, h] = p.box;
             return Math.abs(x - cx) < w / 2 && Math.abs(y - cy) < h / 2;
         }).sort((a, b) => a.area - b.area);
-        if (!hits.length) return;
+        if (!hits.length) return this.pickPoint(x, y);
         const t = hits[0];
         this.picks.target = { id: t.id, frame: d.frame, box: t.box };
         this.picks.plate = this.info?.fingerprint;
@@ -566,6 +592,37 @@ class Picker {
         const dist = (p) => Math.hypot(p.box[0] - tx, p.box[1] - ty);
         this.picks.others = this.subjects.filter((p) => p.id !== t.id).sort((a, b) => dist(a) - dist(b)).slice(0, MAX_OTHERS)
             .map((p) => ({ id: p.id, frame: d.frame, box: p.box }));
+        this.writePicks();
+        this.render();
+    }
+
+    /** Click anywhere that is not a detection: SAM3 segments that point and it becomes the target. */
+    async pickPoint(x, y) {
+        const token = Math.random().toString(36).slice(2, 10);
+        const t = { frame: this.frame, x, y, points: [[x, y]], neg: [], token };
+        this.picks.target = t;
+        this.picks.plate = this.info?.fingerprint;
+        delete this.picks.stale;
+        // Detections on this frame are other subjects: exclude them (nearest first), as for a detected target.
+        const d = this.picks.detect;
+        const dist = (p) => Math.hypot(p.box[0] - x, p.box[1] - y);
+        this.picks.others = d && d.frame === this.frame
+            ? this.subjects.slice().sort((a, b) => dist(a) - dist(b)).slice(0, MAX_OTHERS)
+                .map((p) => ({ id: p.id, frame: d.frame, box: p.box }))
+            : [];
+        this.writePicks();
+        this.render();
+        try {
+            const out = await this.segmentPoint(t.frame, x, y, [], token);
+            t.mask = out.mask;
+            this.parts[token] = tintMask(await loadImage(viewUrl(out.mask)), TARGET);
+            // A detection the clicked object mostly covers is part of it (a person standing on the clicked rug): keep it.
+            const ov = this.parts[token];
+            const inside = new Set(this.subjects.filter((p) => coverage(ov, p.overlay) > 0.6).map((p) => p.id));
+            this.picks.others = this.picks.others.filter((o) => !inside.has(o.id));
+        } catch (e) {
+            console.warn("[SelectiveMatte] target preview failed", e);
+        }
         this.writePicks();
         this.render();
     }
@@ -622,6 +679,15 @@ class Picker {
                 g.fillText(tag, bx + 8, by + 12);
             }
         }
+        const pt = this.picks.target;
+        if (pt && !pt.box && pt.frame === this.frame) {
+            const ov = this.parts[pt.token];
+            if (ov) { g.globalAlpha = 0.55; g.drawImage(ov.canvas, r.x, r.y, r.w, r.h); g.globalAlpha = 1; }
+            const px = r.x + pt.x * r.w, py = r.y + pt.y * r.h;
+            g.strokeStyle = TARGET; g.lineWidth = 3;
+            g.beginPath(); g.arc(px, py, 9, 0, Math.PI * 2); g.stroke();
+            g.fillStyle = TARGET; g.beginPath(); g.arc(px, py, 3, 0, Math.PI * 2); g.fill();
+        }
         for (const [kind, color, sym] of [["cuts", CUT, "×"], ["adds", ADD, "+"]]) {
             for (const p of this.picks[kind]) {
                 if (p.frame !== this.frame) continue;
@@ -638,10 +704,11 @@ class Picker {
         this.hint.textContent = warn ? `⚠ ${warn.warning}`
             : this.picks.stale ? "⚠ The plate changed (crop/resize/new clip) after picking: Detect again."
             : !this.info ? "Connect the plate to 'images', then click Load plate."
-            : !d ? "Scrub to a frame where the subject is fully visible, type what to find (person, dog, car…), click Detect."
-            : !onDetect ? `Detections live on frame ${this.num(d.frame)}. Cuts/adds can go on any frame (place them where the part first appears).`
-            : !this.picks.target ? "Click the subject to matte. Other detections near it are excluded."
-            : "Alt-click: cut a part (someone else's hand).  Shift-click: add a part SAM3 missed.  Ctrl-click: remove.";
+            : !this.picks.target && !d ? "Click anything to matte it, or type what to find (person, dog, car…) and click Detect."
+            : !this.picks.target ? `Detections live on frame ${this.num(d.frame)}. Click a subject there, or click anything on this frame.`
+            : !onDetect && this.picks.target.frame !== this.frame ? "Cuts/adds can go on any frame (place them where the part first appears)."
+            : !this.picks.target ? "Click a detection, or anything else, to matte it. Other detections are excluded."
+            : "Shift-click: add more (the glass, the table).  Alt-click: cut a part.  Ctrl-click: remove.";
     }
 
     renderResult(g) {

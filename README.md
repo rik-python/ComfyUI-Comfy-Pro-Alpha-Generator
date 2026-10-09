@@ -30,7 +30,11 @@ subject from a word you type, then lets LTX draw the edges.
    | `dog, person` | both. Use this to also paint out the people near a dog |
 
    Each detection is outlined and labelled (`2 dog`).
-4. **Click the subject** to matte. It turns orange. Other detections near it are excluded automatically.
+4. **Click the subject** to matte. It turns orange. Other detections are excluded automatically.
+
+   **No typing needed:** click anything that is not a detection (a table, a lamp, a prop), with or without Detect.
+   SAM3 segments what you clicked and it becomes the subject. Then **Shift-click** more objects to add them:
+   the man, then his glass, then the table gives one matte of all three.
 5. Fix parts if needed, on any frame where the part is visible:
 
    | Action | What it does |
@@ -111,7 +115,8 @@ On **Queue**, the node expands into a normal ComfyUI graph:
 5. **Isolated plate**: the other detections inpainted out.
 6. **LTX pass 2** on the isolated plate.
 7. **v12 blend**: LTX edges everywhere, with ViTMatte within about 15 px of other subjects (where LTX has no edge information).
-   Frames where LTX did not matte the subject (low LTX cover) blend to the ViTMatte matte.
+   Parts of the selection LTX did not matte (low LTX cover, e.g. the table under a person's hands) use the
+   ViTMatte matte; the parts LTX did matte keep LTX edges.
 8. Save the alpha and write the QC scores.
 
 Each stage is its own cached node. Changing the quality preset, or running the full shot after a preview, reuses the stages that already finished.

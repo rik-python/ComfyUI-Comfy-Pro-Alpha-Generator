@@ -127,7 +127,7 @@ class SelectiveMatte(io.ComfyNode):
         except ValueError:
             return "picks is not valid JSON"
         if not p.get("target"):
-            return "No subject picked: click 'Detect', then click the subject to matte."
+            return "No subject picked: click the subject in the node (anything in the plate, or a detection after Detect)."
         return True
 
     @classmethod
@@ -188,7 +188,8 @@ class SelectiveMatte(io.ComfyNode):
                 out = m if out is None else g.node("SelectiveMatte_MaskMax", a=out, b=m).out(0)
             return out
 
-        target = box_track(p["target"])
+        # Target from a detection (box) or from a plain click anywhere (SAM3 point prompt, no Detect needed).
+        target = box_track(p["target"]) if "box" in p["target"] else point_track(p["target"])
         in_range = lambda items: [x for x in items if int(x["frame"]) <= last]  # parts first seen after a preview
         refine_kw = {k: v for k, v in (("adds", union([point_track(a) for a in in_range(p.get("adds", []))])),
                                        ("cuts", union([point_track(c) for c in in_range(p.get("cuts", []))])),

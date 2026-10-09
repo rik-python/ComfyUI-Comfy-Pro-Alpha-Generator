@@ -171,25 +171,37 @@ def v12_blend(v7, v11, sel, others, near_px=15):
     return wgt * v7 + (1 - wgt) * v11
 
 
-def ltx_fallback(alpha, ltx, sel, refined, core_px=10, lo=0.3, hi=0.7):
-    """Per frame: how much of the selection's core LTX covers. Where LTX misses the subject (it only mattes what
-    it reads as the main subject), blend toward the ViTMatte matte. People: cover ~1, alpha unchanged.
+def ltx_fallback(alpha, ltx, sel, refined, core_px=10, reach=25.0, lo=0.3, hi=0.7, down=8):
+    """Per AREA: how much LTX covers the selection's core around each pixel (blur radius ~reach px). Where LTX
+    misses part of the selection (it only mattes what it reads as the main subject: a table, a parked car), blend
+    that part toward the ViTMatte matte; parts LTX covers (the person holding the glass) keep LTX edges.
+    People: cover ~1, alpha unchanged. Works at 1/down resolution (the map is smooth anyway).
     Returns (alpha, cover per frame)."""
-    n = len(alpha)
+    n, h, w = alpha.shape
+    sh, sw = max(1, h // down), max(1, w // down)
+    num = np.zeros((n, sh, sw), np.float32)
+    den = np.zeros((n, sh, sw), np.float32)
     cover = np.ones(n, np.float32)
     for f in range(n):
         s = sel[f] > 0.5
         core = cv2.erode(s.astype(np.uint8), ellipse(core_px)).astype(bool)
         core = core if core.any() else s
-        if core.any():
-            cover[f] = float(ltx[f][core].mean())
+        if not core.any():
+            continue
+        cover[f] = float(ltx[f][core].mean())
+        c = cv2.resize(core.astype(np.float32), (sw, sh), interpolation=cv2.INTER_AREA)
+        l = cv2.resize(ltx[f] * core, (sw, sh), interpolation=cv2.INTER_AREA)
+        num[f] = cv2.GaussianBlur(l, (0, 0), reach / down)
+        den[f] = cv2.GaussianBlur(c, (0, 0), reach / down)
     if n > 2:  # smooth over time so the fallback never pops between frames
-        k = np.array([1, 2, 3, 2, 1], np.float32) / 9
-        cover_s = np.convolve(np.pad(cover, 2, mode="edge"), k, mode="valid")
-    else:
-        cover_s = cover
-    w = np.clip((cover_s - lo) / (hi - lo), 0, 1)[:, None, None]
-    return w * alpha + (1 - w) * refined, cover
+        pad = lambda a: np.concatenate([a[:1], a, a[-1:]])
+        num, den = [(lambda p: (p[:-2] + 2 * p[1:-1] + p[2:]) / 4)(pad(a)) for a in (num, den)]
+    out = np.empty_like(alpha)
+    for f in range(n):
+        local = np.where(den[f] > 1e-3, num[f] / np.maximum(den[f], 1e-3), 1.0)
+        wgt = cv2.resize(np.clip((local - lo) / (hi - lo), 0, 1), (w, h), interpolation=cv2.INTER_LINEAR)
+        out[f] = wgt * alpha[f] + (1 - wgt) * refined[f]
+    return out, cover
 
 
 # ---------------------------------------------------------------- LTX chunking (run_ltx_chunks.py)
