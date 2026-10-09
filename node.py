@@ -81,7 +81,10 @@ class SelectiveMatte(io.ComfyNode):
             inputs=[
                 io.Image.Input("images", tooltip=(
                     "The plate. Connect Load Video -> Get Video Components, Load Plate Sequence, or any crop/resize "
-                    "chain. Then click 'Load plate' in the node.")),
+                    "chain. Then click 'Load plate' in the node. "
+                    "Best quality at 1920x1088 (a 1920x1080 plate is padded to 1088 automatically): LTX alpha-gen is "
+                    "tuned for that size. Other sizes work, but edges can come out softer; for 4K, matte a 1080p "
+                    "proxy and scale the alpha up.")),
                 io.Float.Input("fps", default=24.0, min=1.0, max=240.0, step=0.001,
                                tooltip="Plate frame rate (connect Get Video Components / Load Plate Sequence fps)"),
                 io.Int.Input("first_frame", default=1, min=0, max=10**7,
@@ -101,12 +104,19 @@ class SelectiveMatte(io.ComfyNode):
                 io.Combo.Input("vitmatte", options=_vitmatte_options(), display_name="ViTMatte",
                                tooltip="Folder in ComfyUI/models/vitmatte/, or auto-download on first run"),
                 # advanced
-                io.Int.Input("chunk", default=49, min=9, max=145, step=8, tooltip="LTX frames per render (8n+1)"),
-                io.Int.Input("stride", default=40, min=1, max=144),
+                io.Int.Input("chunk", default=49, min=9, max=145, step=8, display_name="frames per chunk",
+                             tooltip="LTX renders the shot in chunks of this many frames (8n+1). 49 fits 1920x1088 on 32 GB."),
+                io.Int.Input("overlap", default=9, min=0, max=72, display_name="overlap frames",
+                             tooltip="Frames shared by neighbouring chunks and cross-faded so the joins don't show. "
+                                     "More = smoother joins but more chunks (slower). 9 = a new chunk every 40 frames."),
                 io.Int.Input("seed", default=42, min=0, max=2**31 - 1, control_after_generate=False),
                 io.Int.Input("erode", default=10, min=0, max=64), io.Int.Input("dilate", default=15, min=1, max=64),
                 io.Int.Input("near_px", default=15, min=1, max=64, tooltip="v7 zone around other excluded subjects (Best)"),
-                io.Int.Input("stabilize_radius", default=2, min=0, max=6),
+                io.Int.Input("stabilize_radius", default=2, min=0, max=6, display_name="temporal smoothing (frames)",
+                             tooltip="Removes frame-to-frame chatter in the SAM3/ViTMatte edges: each frame is averaged "
+                                     "with this many frames before and after, warped by optical flow (occlusions are "
+                                     "ignored). 0 = off, 2 = default (5-frame window). Higher is smoother but fast "
+                                     "motion can lag or ghost, and it is slower. LTX edges are already stable."),
                 io.Float.Input("sam3_threshold", default=0.3, min=0.0, max=1.0, step=0.01),
                 io.Boolean.Input("fast_attention", default=True, tooltip=(
                     "Comfy Kitchen int8 attention for LTX: about 36% faster sampling, matte difference ~0.004 "
@@ -132,7 +142,7 @@ class SelectiveMatte(io.ComfyNode):
 
     @classmethod
     def execute(cls, images, fps, first_frame, quality, render, picks, filename_prefix, format, ltx_model, alpha_lora, text_encoder,
-                video_vae, audio_vae, vitmatte, chunk, stride, seed, erode, dilate, near_px, stabilize_radius,
+                video_vae, audio_vae, vitmatte, chunk, overlap, seed, erode, dilate, near_px, stabilize_radius,
                 sam3_threshold, fast_attention=True):
         p = json.loads(picks)
         n_video, H, W = images.shape[:3]
@@ -145,9 +155,9 @@ class SelectiveMatte(io.ComfyNode):
         L = min(chunk, E.ltx_frames(count) if count >= chunk else 8 * math.ceil((count - 1) / 8) + 1)
         if render == RENDER[1]:
             count = min(count, L)
-        starts = E.chunk_starts(count, L, stride)
+        starts = E.chunk_starts(count, L, max(1, L - overlap))
         if len(starts) > 24:
-            raise ValueError(f"{count} frames needs {len(starts)} chunks (max 24): raise stride or split the shot")
+            raise ValueError(f"{count} frames needs {len(starts)} chunks (max 24): lower 'overlap frames' or split the shot")
         best = quality == QUALITY[0]
         prefix = filename_prefix + ("_preview" if render == RENDER[1] else "")
 

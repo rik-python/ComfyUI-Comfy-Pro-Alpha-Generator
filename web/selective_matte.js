@@ -11,7 +11,7 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 const NODE = "SelectiveMatte";
-const ADVANCED = ["chunk", "stride", "fast_attention",
+const ADVANCED = ["chunk", "overlap", "fast_attention",
     "seed", "control_after_generate", "erode", "dilate", "near_px", "stabilize_radius", "sam3_threshold"];
 const HIDDEN = ["picks", "render"];
 const COLORS = ["#4aa3ff", "#b07cff", "#3fd0c9", "#e6d94a", "#ff6fb5", "#8bd450", "#ff9d5c", "#9aa4b2"];
@@ -99,26 +99,57 @@ function showWidget(w) {
 }
 
 /** Queue a tiny helper graph (detect / part preview) and resolve with the ui payload of its report node. */
-async function runHelper(prompt, reportId, key) {
-    const res = await api.fetchApi("/prompt", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt, client_id: api.clientId }),
-    });
-    const body = await res.json();
-    if (!res.ok || body.error) throw new Error(body.error?.message || JSON.stringify(body.node_errors || body));
-    const pid = body.prompt_id;
+async function runHelper(prompt, reportId, key, onWait) {
+    // Listen BEFORE posting: a fully cached helper finishes in ~10 ms and its websocket "executed" message can arrive
+    // before the /prompt response that tells us the prompt id. Events are buffered until the id is known, and
+    // /history is polled as a backstop in case a message is missed anyway (reconnect, other tab).
+    const seen = [];
+    let pid = null, settle = null;
+    const onExec = (e) => { seen.push(["ok", e.detail]); settle?.(); };
+    const onErr = (e) => { seen.push(["err", e.detail]); settle?.(); };
+    api.addEventListener("executed", onExec);
+    api.addEventListener("execution_error", onErr);
+    const done = () => { api.removeEventListener("executed", onExec); api.removeEventListener("execution_error", onErr); };
+    try {
+        const res = await api.fetchApi("/prompt", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ prompt, client_id: api.clientId, front: true }),
+        });
+        const body = await res.json();
+        if (!res.ok || body.error) throw new Error(body.error?.message || JSON.stringify(body.node_errors || body));
+        pid = body.prompt_id;
+    } catch (e) {
+        done();
+        throw e;
+    }
     return new Promise((resolve, reject) => {
-        const onExec = (e) => {
-            const d = e.detail;
-            if (d.prompt_id === pid && d.node === reportId && d.output?.[key]) { done(); resolve(d.output[key][0]); }
+        let timer = null;
+        const finish = (fn, v) => { done(); clearInterval(timer); settle = null; onWait?.(false); fn(v); };
+        settle = () => {
+            for (const [kind, d] of seen) {
+                if (d?.prompt_id !== pid) continue;
+                if (kind === "err") return finish(reject, new Error(d.exception_message || "helper failed"));
+                if (d.node === reportId && d.output?.[key]) return finish(resolve, d.output[key][0]);
+            }
         };
-        const onErr = (e) => {
-            if (e.detail?.prompt_id === pid) { done(); reject(new Error(e.detail.exception_message || "helper failed")); }
-        };
-        const done = () => { api.removeEventListener("executed", onExec); api.removeEventListener("execution_error", onErr); };
-        api.addEventListener("executed", onExec);
-        api.addEventListener("execution_error", onErr);
+        settle();
+        timer = setInterval(async () => {
+            try {
+                const h = await (await api.fetchApi(`/history/${pid}`)).json();
+                const entry = h[pid];
+                if (!settle) return;
+                if (!entry) {  // not finished: is it waiting behind someone else's render? (ComfyUI runs one job at a time)
+                    const q = await (await api.fetchApi("/queue")).json();
+                    const running = (q.queue_running || []).map((x) => x[1]);
+                    onWait?.(running.length > 0 && !running.includes(pid));
+                    return;
+                }
+                const out = entry?.outputs?.[reportId]?.[key];
+                if (out) return finish(resolve, out[0]);
+                if (entry.status?.status_str === "error") finish(reject, new Error("helper failed (see the ComfyUI console)"));
+            } catch { /* server busy: try again */ }
+        }, 1000);
     });
 }
 
@@ -238,9 +269,10 @@ class Picker {
         this.qc = el("div", "sm-qc");
         root.append(bar, view, scrub, this.status, this.qc);
 
-        // Fixed panel height (never derived from node.size: the node grows to fit its widgets -> feedback loop).
+        // Min height only, no max: the frontend gives the panel all spare node height, so it grows/shrinks when the
+        // node is resized. (Never derive the height from node.size ourselves: the node grows to fit -> feedback loop.)
         this.widget = this.node.addDOMWidget("selective_matte_ui", "sm-ui", root, {
-            serialize: false, hideOnZoom: false, getMinHeight: () => 560, getMaxHeight: () => 560,
+            serialize: false, hideOnZoom: false, getMinHeight: () => 420,
         });
 
         HIDDEN.forEach((n) => hideWidget(this.w[n]));
@@ -274,7 +306,8 @@ class Picker {
     /** Run a helper graph on the CURRENT plate (upstream nodes are cached by ComfyUI, so this is quick). */
     async helper(build, reportId, key) {
         const up = await this.upstream();
-        return runHelper({ ...up.prompt, ...build(up.images, up.firstFrame) }, reportId, key);
+        const onWait = (w) => { if (w !== !!this.waiting) { this.waiting = w; this.render(); } };
+        return runHelper({ ...up.prompt, ...build(up.images, up.firstFrame) }, reportId, key, onWait);
     }
 
     async loadPlate() {
@@ -305,9 +338,10 @@ class Picker {
         }
     }
 
+    /** Grow the node to fit its widgets; never shrink below the size the user dragged it to. */
     fitNode() {
         const min = this.node.computeSize();
-        this.node.setSize([Math.max(this.node.size[0], 640), min[1]]);
+        this.node.setSize([Math.max(this.node.size[0], 640), Math.max(this.node.size[1], min[1])]);
         app.graph?.setDirtyCanvas(true, true);
     }
 
@@ -326,7 +360,18 @@ class Picker {
             c.append(d, document.createTextNode(text));
             return c;
         };
+        const kids = [];
+        if (this.info) {  // LTX alpha-gen is tuned for 1920x1088; a 1920x1080 plate is padded to it automatically
+            const { width: w, height: h } = this.info;
+            const best = w === 1920 && (h === 1080 || h === 1088);
+            const c = chip(best ? ADD : "#ffc94d", best ? `plate ${w}×${h}` : `plate ${w}×${h} (best: 1920×1088)`);
+            c.title = best ? "Best size for LTX alpha-gen."
+                : "LTX alpha-gen is tuned for 1920x1088 (1080p plates are padded automatically). Other sizes work, "
+                  + "but edges can be softer. Resize upstream for best quality; for 4K, matte a 1080p proxy.";
+            kids.push(c);
+        }
         this.status.replaceChildren(
+            ...kids,
             chip(TARGET, !p.target ? "no target"
                 : p.target.box ? `target #${p.target.id + 1} (frame ${this.num(p.target.frame)})`
                 : `target: clicked object (frame ${this.num(p.target.frame)})`),
@@ -535,15 +580,27 @@ class Picker {
         if (this.picks.stale && !confirm("The plate changed after you picked the subject. Run anyway?")) return;
         const r = this.w.render;
         r.value = preview ? "preview chunk" : "full shot";
-        try { await app.queuePrompt(0, 1); }
-        finally { r.value = "full shot"; }
+        try {
+            await app.queuePrompt(0, 1);
+            // queuePrompt can return before the graph is serialized (when the frontend is still sending an earlier
+            // prompt): wait until it is done, or the reset below would turn a preview into a full shot.
+            for (let i = 0; i < 100 && app.processingQueue; i++) await new Promise((res) => setTimeout(res, 100));
+        } finally { r.value = "full shot"; }
     }
 
     // ------------------------------------------------------------ interaction
+    /** Physical screen pixels per widget CSS pixel: graph zoom (CSS transform) x display scaling. */
+    screenScale() {
+        const k = this.canvas.getBoundingClientRect().width / (this.canvas.clientWidth || 1);
+        return (k || 1) * (window.devicePixelRatio || 1);
+    }
+
     imageRect() {
         const cw = this.canvas.clientWidth, ch = this.canvas.clientHeight;
         const iw = this.info?.width || 16, ih = this.info?.height || 9;
-        const s = Math.min(cw / iw, ch / ih);
+        // Never show the plate bigger than its real size on screen (1 plate pixel = at most 1 screen pixel), however
+        // large the node or the graph zoom: blown-up frames invite pixel peeping on proxies. Judge edges in comp.
+        const s = Math.min(cw / iw, ch / ih, this.info ? 1 / this.screenScale() : Infinity);
         const w = iw * s, h = ih * s;
         return { x: (cw - w) / 2, y: (ch - h) / 2, w, h };
     }
@@ -551,7 +608,10 @@ class Picker {
     onPointer(e) {
         const r = this.imageRect();
         const b = this.canvas.getBoundingClientRect();
-        const x = (e.clientX - b.left - r.x) / r.w, y = (e.clientY - b.top - r.y) / r.h;
+        // The graph canvas zooms DOM widgets with a CSS transform: the on-screen rect is scaled, clientWidth/imageRect
+        // are not. Convert the screen offset back to unscaled widget pixels first, or clicks land off at any zoom != 100%.
+        const kx = b.width / (this.canvas.clientWidth || 1), ky = b.height / (this.canvas.clientHeight || 1);
+        const x = ((e.clientX - b.left) / kx - r.x) / r.w, y = ((e.clientY - b.top) / ky - r.y) / r.h;
         if (this.tab === "result") { this.wipe = Math.max(0, Math.min(1, x)); this.render(); return; }
         if (x < 0 || x > 1 || y < 0 || y > 1 || e.button !== 0) return;
         e.preventDefault(); e.stopPropagation();
@@ -699,6 +759,12 @@ class Picker {
                 g.fillText(sym, px, py + 1);
             }
         }
+        if (this.waiting) {
+            this.hint.style.background = "#5a4a12dd";
+            this.hint.textContent = "⏳ Waiting for the running render to finish (ComfyUI runs one job at a time). "
+                + "Cancel it in the queue panel to go now.";
+            return;
+        }
         const warn = [...this.picks.cuts, ...this.picks.adds].find((p) => p.warning);
         this.hint.style.background = warn || this.picks.stale ? "#7a1f1fdd" : "";
         this.hint.textContent = warn ? `⚠ ${warn.warning}`
@@ -736,8 +802,15 @@ class Picker {
         g.strokeStyle = TARGET; g.lineWidth = 2;
         g.beginPath(); g.moveTo(r.x + split, r.y); g.lineTo(r.x + split, r.y + r.h); g.stroke();
         const q = res.info;
-        this.hint.textContent = `${q.mode} · frame ${q.first_frame + it.frame} · drag to wipe plate | ${key}` +
-            (q.out_dir ? ` · saved: ${q.out_dir}` : "");
+        const kind = /_preview$/.test(q.out_dir || "") ? "preview" : "full shot";
+        const range = `${kind}: frames ${q.first_frame}-${q.first_frame + q.frames - 1}`;
+        const inside = this.frame >= first && this.frame < first + q.frames;
+        this.hint.style.background = inside ? "" : "#5a4a12dd";
+        this.hint.textContent = inside
+            ? `${range} · ${q.mode} · frame ${q.first_frame + it.frame} · drag to wipe plate | ${key}` +
+              (q.out_dir ? ` · saved: ${q.out_dir}` : "")
+            : `Frame ${this.num(this.frame)} is outside this render (${range}). Showing the nearest rendered frame.` +
+              (kind === "preview" ? " Run full shot to render the rest." : "");
     }
 
     showResult(output) {
@@ -819,6 +892,15 @@ app.registerExtension({
                 this.smPicker.restore();
             }
             return r;
+        };
+        // Graph zoom changes the on-screen size without resizing the widget: re-fit the plate when it changes.
+        const drawFg = nodeType.prototype.onDrawForeground;
+        nodeType.prototype.onDrawForeground = function () {
+            drawFg?.apply(this, arguments);
+            const p = this.smPicker;
+            if (!p?.info) return;
+            const k = p.screenScale();
+            if (Math.abs(k - (p.lastScale || 0)) > 0.01) { p.lastScale = k; p.render(); }
         };
         const executed = nodeType.prototype.onExecuted;
         nodeType.prototype.onExecuted = function (output) {

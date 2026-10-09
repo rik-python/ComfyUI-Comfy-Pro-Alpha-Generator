@@ -19,6 +19,9 @@ subject from a word you type, then lets LTX draw the edges.
    - Output frames keep the plate's numbers: `plate.1001` gives `alpha_01001`.
 
    Any nodes can sit in between (crop, resize, colour). The node mattes whatever arrives at `images`.
+   **Best quality at 1920x1088** (a 1920x1080 plate is padded automatically): LTX alpha-gen is tuned for that size.
+   Other sizes work but edges can be softer. For 4K plates, matte a 1080p proxy and scale the alpha up.
+   The picker shows the plate size as a chip (amber when it is not 1920x1080/1088).
 2. Click **Load plate** in the node. It runs the nodes feeding `images` and fills the scrubber.
    Click it again whenever you change the crop or the clip. If the plate changes after you picked someone, the node warns you to re-detect.
 3. Scrub to a frame where the subject is fully visible. Type what to find in the box next to **Detect** and press **Detect** (or Enter):
@@ -73,7 +76,7 @@ It is 16-bit PNG by default; set `format` to `exr` for half-float EXR.
 **Models** are always visible on the node: LTX model, alpha-gen IC-LoRA, text encoder, video VAE, audio VAE, ViTMatte. Hover a model selector to see the recommended file and its folder.
 After you copy model files into the folders, press **R** in ComfyUI to refresh the lists. A missing model is reported by name when you queue.
 
-`⚙ Advanced` holds the chunk/stride/seed settings, the trimap erode/dilate, the near-people zone, the SAM3 threshold and `fast_attention`.
+`⚙ Advanced` holds frames per chunk, overlap frames (chunk joins are cross-faded over these), the seed, temporal smoothing (frames before/after each frame used to steady the SAM3/ViTMatte edges, default 2), the trimap erode/dilate, the zone near other subjects, the SAM3 threshold and `fast_attention`.
 
 **Speed.** `fast_attention` (on by default) runs LTX with Comfy Kitchen int8 attention, built into ComfyUI 0.38+.
 LTX sampling is about 36% faster. The matte changes by about 0.004 on edges, 7x less than changing the seed.
@@ -132,4 +135,4 @@ Each stage is its own cached node. Changing the quality preset, or running the f
 - If something fully covers the subject (a car driving in front of it), SAM3 can lose the track for the rest of
   the shot. Pick on a frame after the occlusion, or split the shot.
 - Light fringes on hair are colour spill from the plate. Despill in comp.
-- Shots are limited to 24 chunks (about 960 frames at stride 40). Split longer shots.
+- Shots are limited to 24 chunks (about 960 frames with the default 9 overlap frames). Split longer shots.
