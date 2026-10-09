@@ -1,0 +1,15 @@
+[project]
+name = "comfyui-selectivematte"
+description = "One-node selective matte: SAM3 picks the person, LTX-2.5 alpha-gen draws the edges (hair-level), ONYX-style picker UI."
+version = "0.1.0"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = ["opencv-python-headless", "transformers", "huggingface_hub", "av"]
+
+[project.urls]
+Repository = "https://github.com/rikinpatel/ComfyUI-SelectiveMatte"
+
+[tool.comfy]
+PublisherId = "rikinpatel"
+DisplayName = "ComfyUI-SelectiveMatte"
+Icon = ""

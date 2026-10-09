@@ -1,0 +1,401 @@
+"""Internal stage nodes. The Selective Matte node expands into these (plus SAM3 / LTX nodes) at run time.
+
+They are registered so ComfyUI can execute them, but flagged deprecated so they stay out of node search.
+Every stage is its own cached node: switching Fast/Best or re-running a preview reuses finished stages.
+"""
+import json
+import os
+
+import numpy as np
+import torch
+
+import comfy.model_management
+import comfy.utils
+import folder_paths
+from comfy_api.latest import io, ui
+
+from . import _engine as E
+from ._video import read_frames
+
+CAT = "SelectiveMatte/internal"
+
+
+def _schema(node_id, inputs, outputs, output_node=False):
+    return io.Schema(node_id=node_id, display_name=node_id.replace("SelectiveMatte_", "SM "), category=CAT,
+                     inputs=inputs, outputs=outputs, is_deprecated=True, is_output_node=output_node)
+
+
+def _np(t):
+    return t.detach().cpu().float().numpy()
+
+
+def _opt(m):
+    return [_np(m)] if m is not None else []
+
+
+# ------------------------------------------------------------------ plate
+
+class Plate(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return _schema("SelectiveMatte_Plate",
+                       [io.String.Input("file"), io.Int.Input("start", default=0), io.Int.Input("count", default=0)],
+                       [io.Image.Output("plate")])
+
+    @classmethod
+    def execute(cls, file, start, count):
+        frames = read_frames(folder_paths.get_annotated_filepath(file), start, count)
+        return io.NodeOutput(torch.from_numpy(frames).float() / 255.0)
+
+
+class LoadVideo(io.ComfyNode):
+    """VIDEO for SAM3 without the preview core LoadVideo would post onto the Selective Matte node."""
+
+    @classmethod
+    def define_schema(cls):
+        return _schema("SelectiveMatte_LoadVideo", [io.String.Input("file")], [io.Video.Output("video")])
+
+    @classmethod
+    def execute(cls, file):
+        from comfy_api.latest import InputImpl
+        return io.NodeOutput(InputImpl.VideoFromFile(folder_paths.get_annotated_filepath(file)))
+
+
+class Frame(io.ComfyNode):
+    """One frame as IMAGE (for the picker's SAM3 detection / part preview)."""
+
+    @classmethod
+    def define_schema(cls):
+        return _schema("SelectiveMatte_Frame", [io.String.Input("file"), io.Int.Input("index", default=0)],
+                       [io.Image.Output("image")])
+
+    @classmethod
+    def execute(cls, file, index):
+        from ._video import read_frame
+        f = read_frame(folder_paths.get_annotated_filepath(file), index)
+        return io.NodeOutput(torch.from_numpy(f[None]).float() / 255.0)
+
+
+class TrackMasks(io.ComfyNode):
+    """SAM3Propagate output (dict frame -> [obj,H,W]) -> MASK [count,H,W] for the processed range.
+
+    Replaces SAM3VideoOutput, which also renders full-length RGB + visualization batches (~90 s and ~12 GB per
+    track); here only the mask is built and only for the frames we use.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return _schema("SelectiveMatte_TrackMasks", [
+            io.Custom("SAM3_VIDEO_MASKS").Input("masks"), io.Int.Input("start", default=0),
+            io.Int.Input("count", default=1), io.Int.Input("width", default=1920), io.Int.Input("height", default=1080),
+        ], [io.Mask.Output("mask")])
+
+    @classmethod
+    def execute(cls, masks, start, count, width, height):
+        out = torch.zeros(count, height, width)
+        for t in range(count):
+            m = masks.get(str(start + t))
+            if m is None:
+                continue
+            m = torch.as_tensor(m).float()
+            while m.dim() > 3:
+                m = m.flatten(0, 1)
+            if m.numel() == 0:  # object lost / left frame: SAM3 returns [0,H,W]
+                continue
+            if m.dim() == 3:
+                m = m.amax(0)
+            if m.numel() and m.max() > 1.0:
+                m = m / 255.0
+            if m.shape != (height, width):
+                m = torch.nn.functional.interpolate(m[None, None], size=(height, width), mode="bilinear")[0, 0]
+            out[t] = m.clamp(0, 1)
+        return io.NodeOutput(out)
+
+
+class MaskMax(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return _schema("SelectiveMatte_MaskMax", [io.Mask.Input("a"), io.Mask.Input("b")], [io.Mask.Output("mask")])
+
+    @classmethod
+    def execute(cls, a, b):
+        return io.NodeOutput(torch.maximum(a, b))
+
+
+# ------------------------------------------------------------------ selection + ViTMatte + stabilize
+
+_VITMATTE = {}
+
+
+def _vitmatte(name):
+    from transformers import VitMatteForImageMatting, VitMatteImageProcessor
+
+    if name not in _VITMATTE:
+        path = folder_paths.get_full_path("vitmatte", name) if name != "auto-download" else None
+        if path is None or not os.path.isdir(path):
+            path = _download_vitmatte()
+        proc = VitMatteImageProcessor.from_pretrained(path)
+        model = VitMatteForImageMatting.from_pretrained(path).to(comfy.model_management.get_torch_device(), torch.float16)
+        model.train(False)  # inference mode
+        _VITMATTE.clear()
+        _VITMATTE[name] = (model, proc)
+    return _VITMATTE[name]
+
+
+def _download_vitmatte():
+    from huggingface_hub import snapshot_download
+
+    dest = os.path.join(folder_paths.models_dir, "vitmatte", "vitmatte-base-composition-1k")
+    if not os.path.isfile(os.path.join(dest, "config.json")):
+        snapshot_download("hustvl/vitmatte-base-composition-1k", local_dir=dest)
+    return dest
+
+
+class Refine(io.ComfyNode):
+    """Selection (target + adds - cuts), ONYX-style ViTMatte edge, optical-flow stabilization."""
+
+    @classmethod
+    def define_schema(cls):
+        return _schema("SelectiveMatte_Refine", [
+            io.Image.Input("plate"), io.Mask.Input("target"),
+            io.Mask.Input("adds", optional=True), io.Mask.Input("cuts", optional=True),
+            io.Mask.Input("others", optional=True),
+            io.String.Input("vitmatte", default="auto-download"),
+            io.Int.Input("erode", default=10), io.Int.Input("dilate", default=15), io.Int.Input("radius", default=2),
+        ], [io.Mask.Output("selection"), io.Mask.Output("refined"), io.Mask.Output("others")])
+
+    @classmethod
+    def execute(cls, plate, target, vitmatte, erode, dilate, radius, adds=None, cuts=None, others=None):
+        n = plate.shape[0]
+        rgb = (plate.cpu().numpy() * 255).round().astype(np.uint8)
+        sel, oth = E.build_selection(_np(target), _opt(adds), _opt(cuts), _opt(others))
+
+        model, proc = _vitmatte(vitmatte)
+        pbar = comfy.utils.ProgressBar(2 * n)
+        vit = np.empty_like(sel)
+        for f in range(n):
+            comfy.model_management.throw_exception_if_processing_interrupted()
+            vit[f] = E.vitmatte_frame(model, proc, rgb[f], sel[f], erode, dilate)
+            pbar.update(1)
+        _VITMATTE.clear()
+        comfy.model_management.soft_empty_cache()
+
+        sel, vit, oth = E.stabilize([sel, vit, oth], E.to_gray(rgb), radius=radius,
+                                    progress=lambda i, t: pbar.update(1))
+        t = lambda a: torch.from_numpy(np.clip(a, 0, 1))
+        return io.NodeOutput(t(sel), t(vit), t(oth))
+
+
+# ------------------------------------------------------------------ isolated plate
+
+class Isolate(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return _schema("SelectiveMatte_Isolate", [
+            io.Image.Input("plate"), io.Mask.Input("selection"), io.Mask.Input("others"),
+            io.Int.Input("grow", default=6), io.Float.Input("blur", default=6.0),
+        ], [io.Image.Output("isolated")])
+
+    @classmethod
+    def execute(cls, plate, selection, others, grow, blur):
+        rgb = plate.cpu().numpy() * 255.0
+        sel, oth = _np(selection), _np(others)
+        out = np.empty_like(rgb)
+        pbar = comfy.utils.ProgressBar(len(rgb))
+        for f in range(len(rgb)):
+            out[f] = E.isolate_frame(rgb[f], sel[f], oth[f], grow, blur)
+            pbar.update(1)
+        # Round-trip through 8 bit like the CLI's mp4 plate, so LTX sees the same kind of input.
+        return io.NodeOutput(torch.from_numpy(np.clip(out, 0, 255).round() / 255.0).float())
+
+
+# ------------------------------------------------------------------ LTX chunking
+
+class ChunkPad(io.ComfyNode):
+    """Slice one LTX chunk and pad it: H/W to a multiple of 32 (replicate edge), length to 8k+1 (repeat last)."""
+
+    @classmethod
+    def define_schema(cls):
+        return _schema("SelectiveMatte_ChunkPad", [
+            io.Image.Input("images"), io.Int.Input("start", default=0), io.Int.Input("length", default=49),
+        ], [io.Image.Output("chunk")])
+
+    @classmethod
+    def execute(cls, images, start, length):
+        c = images[start:start + length]
+        if c.shape[0] < length:
+            c = torch.cat([c, c[-1:].repeat(length - c.shape[0], 1, 1, 1)])
+        h, w = c.shape[1:3]
+        ph, pw = (-h) % 32, (-w) % 32
+        if ph or pw:
+            c = torch.nn.functional.pad(c.permute(0, 3, 1, 2), (0, pw, 0, ph), mode="replicate").permute(0, 2, 3, 1)
+        return io.NodeOutput(c)
+
+
+class Stitch(io.ComfyNode):
+    """Cross-fade decoded LTX chunks (triangular weights) into one alpha MASK of the processed range."""
+    MAX = 24
+
+    @classmethod
+    def define_schema(cls):
+        return _schema("SelectiveMatte_Stitch",
+                       [io.String.Input("plan")] + [io.Image.Input(f"chunk_{i}", optional=True) for i in range(cls.MAX)],
+                       [io.Mask.Output("alpha")])
+
+    @classmethod
+    def execute(cls, plan, **chunks):
+        p = json.loads(plan)
+        n, h, w, L, starts = p["n"], p["h"], p["w"], p["chunk"], p["starts"]
+        acc = torch.zeros(n, h, w)
+        wsum = torch.zeros(n, 1, 1)
+        for i, s in enumerate(starts):
+            img = chunks[f"chunk_{i}"][:, :h, :w].float().cpu().mean(-1)
+            for k in range(min(L, n - s)):
+                wt = E.chunk_weight(i, starts, L, k)
+                acc[s + k] += img[k] * wt
+                wsum[s + k] += wt
+        return io.NodeOutput((acc / wsum).clamp(0, 1))
+
+
+# ------------------------------------------------------------------ final
+
+def _save(alpha, prefix, fmt, first_frame):
+    import cv2
+
+    out_dir = os.path.join(folder_paths.get_output_directory(), prefix)
+    os.makedirs(out_dir, exist_ok=True)
+    if fmt == "exr":
+        os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
+    for i, a in enumerate(alpha):
+        path = os.path.join(out_dir, f"alpha_{first_frame + i:05d}.{'exr' if fmt == 'exr' else 'png'}")
+        if fmt == "exr":
+            ok = cv2.imwrite(path, a.astype(np.float32), [cv2.IMWRITE_EXR_TYPE, cv2.IMWRITE_EXR_TYPE_HALF,
+                                                         cv2.IMWRITE_EXR_COMPRESSION, cv2.IMWRITE_EXR_COMPRESSION_ZIP])
+        else:
+            ok = cv2.imwrite(path, (np.clip(a, 0, 1) * 65535).round().astype(np.uint16))
+        if not ok:
+            raise RuntimeError(f"could not write {path}" + (" (OpenCV EXR disabled: start ComfyUI with "
+                                                             "OPENCV_IO_ENABLE_OPENEXR=1 or use png16)" if fmt == "exr" else ""))
+    return out_dir
+
+
+def _previews(plate, alpha, every):
+    """Small JPEG pairs (plate, comp over grey) in temp/ for the in-node compare viewer."""
+    from PIL import Image
+
+    tmp = folder_paths.get_temp_directory()
+    sub = "selective_matte_preview"
+    os.makedirs(os.path.join(tmp, sub), exist_ok=True)
+    tag = os.urandom(4).hex()
+    items = []
+    h, w = alpha.shape[1:]
+    size = (min(960, w), int(min(960, w) * h / w))
+    for f in range(0, len(alpha), every):
+        rgb = plate[f]
+        a = alpha[f][..., None]
+        comp = rgb * a + 0.5 * (1 - a)
+        names = []
+        for kind, img in (("plate", rgb), ("comp", comp), ("alpha", np.repeat(a, 3, -1))):
+            name = f"sm_{tag}_{f:05d}_{kind}.jpg"
+            Image.fromarray((np.clip(img, 0, 1) * 255).astype(np.uint8)).resize(size).save(os.path.join(tmp, sub, name), quality=85)
+            names.append({"filename": name, "subfolder": sub, "type": "temp"})
+        items.append({"frame": f, "plate": names[0], "comp": names[1], "alpha": names[2]})
+    return items
+
+
+class Final(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return _schema("SelectiveMatte_Final", [
+            io.Image.Input("plate"), io.Mask.Input("ltx"), io.Mask.Input("ltx_isolated", optional=True),
+            io.Mask.Input("selection"), io.Mask.Input("refined"), io.Mask.Input("others"),
+            io.Int.Input("near_px", default=15), io.String.Input("filename_prefix", default="selective_matte/shot"),
+            io.Combo.Input("format", options=["png16", "exr"]), io.Int.Input("first_frame", default=1),
+            io.Boolean.Input("save", default=True), io.Boolean.Input("qc", default=True),
+        ], [io.Mask.Output("alpha"), io.Image.Output("comp")], output_node=True)
+
+    @classmethod
+    def execute(cls, plate, ltx, selection, refined, others, near_px, filename_prefix, format, first_frame,
+                save, qc, ltx_isolated=None):
+        p = plate.cpu().numpy()
+        L, S, R, O = _np(ltx), _np(selection), _np(refined), _np(others)
+        n = len(p)
+        v7 = np.stack([E.hybrid(L[f], S[f], R[f]) for f in range(n)])
+        if ltx_isolated is not None:
+            I = _np(ltx_isolated)
+            v11 = np.stack([E.level(I[f], S[f], O[f])[0] for f in range(n)])
+            alpha = np.stack([E.v12_blend(v7[f], v11[f], S[f], O[f], near_px) for f in range(n)])
+            mode = "v12 (best)"
+        else:
+            alpha, mode = v7, "v7 (fast)"
+        alpha = np.clip(alpha, 0, 1).astype(np.float32)
+
+        out_dir = _save(alpha, filename_prefix, format, first_frame) if save else ""
+        score = E.qc(E.to_gray(p), S, L, alpha) if qc else {}
+        comp = p * alpha[..., None] + 0.5 * (1 - alpha[..., None])
+        info = {"mode": mode, "frames": n, "first_frame": first_frame, "out_dir": out_dir, "format": format,
+                **{k: float(v) for k, v in score.items()}}
+        ui_out = {"selective_matte": [info], "previews": _previews(p, alpha, max(1, n // 48))}
+        return io.NodeOutput(torch.from_numpy(alpha), torch.from_numpy(comp.astype(np.float32)), ui=ui_out)
+
+
+# ------------------------------------------------------------------ detection report (for the picker UI)
+
+class DetectReport(io.ComfyNode):
+    """Turns SAM3 text detections on one frame into boxes + outline PNGs the picker draws as overlays."""
+
+    @classmethod
+    def define_schema(cls):
+        return _schema("SelectiveMatte_DetectReport",
+                       [io.Mask.Input("masks"), io.Int.Input("frame", default=0), io.String.Input("token", default="")],
+                       [], output_node=True)
+
+    @classmethod
+    def execute(cls, masks, frame, token):
+        from PIL import Image
+
+        m = _np(masks)
+        if m.ndim == 2:
+            m = m[None]
+        tmp = folder_paths.get_temp_directory()
+        sub = "selective_matte_detect"
+        os.makedirs(os.path.join(tmp, sub), exist_ok=True)
+        people = []
+        h, w = m.shape[1:]
+        for i, mk in enumerate(m):
+            ys, xs = np.where(mk > 0.5)
+            if len(ys) < 50:
+                continue
+            x0, x1, y0, y1 = xs.min() / w, (xs.max() + 1) / w, ys.min() / h, (ys.max() + 1) / h
+            name = f"det_{token}_{i}.png"
+            Image.fromarray(((mk > 0.5) * 255).astype(np.uint8), "L").save(os.path.join(tmp, sub, name))
+            people.append({"id": len(people), "box": [(x0 + x1) / 2, (y0 + y1) / 2, x1 - x0, y1 - y0],
+                           "area": float((mk > 0.5).mean()),
+                           "mask": {"filename": name, "subfolder": sub, "type": "temp"}})
+        return io.NodeOutput(ui={"selective_matte_detect": [{"frame": frame, "token": token, "people": people}]})
+
+
+class PartReport(io.ComfyNode):
+    """Single-frame mask preview for a cut/add click (SAM3 point segmentation)."""
+
+    @classmethod
+    def define_schema(cls):
+        return _schema("SelectiveMatte_PartReport",
+                       [io.Mask.Input("mask"), io.String.Input("token", default="")], [], output_node=True)
+
+    @classmethod
+    def execute(cls, mask, token):
+        from PIL import Image
+
+        m = _np(mask)
+        m = m[0] if m.ndim == 3 else m
+        tmp = folder_paths.get_temp_directory()
+        sub = "selective_matte_detect"
+        os.makedirs(os.path.join(tmp, sub), exist_ok=True)
+        name = f"part_{token}.png"
+        Image.fromarray(((m > 0.5) * 255).astype(np.uint8), "L").save(os.path.join(tmp, sub, name))
+        return io.NodeOutput(ui={"selective_matte_part": [{"token": token,
+                                                          "mask": {"filename": name, "subfolder": sub, "type": "temp"}}]})
+
+
+NODES = [Plate, LoadVideo, Frame, TrackMasks, MaskMax, Refine, Isolate, ChunkPad, Stitch, Final, DetectReport, PartReport]

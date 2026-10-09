@@ -1,0 +1,68 @@
+{
+ "id": "8179a39c-b849-43d7-a4e9-e792d693ab89",
+ "revision": 0,
+ "last_node_id": 1,
+ "last_link_id": 0,
+ "nodes": [
+  {
+   "id": 1,
+   "type": "SelectiveMatte",
+   "pos": [
+    100,
+    100
+   ],
+   "size": [
+    640,
+    738
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "alpha",
+     "type": "MASK",
+     "links": null
+    },
+    {
+     "name": "comp",
+     "type": "IMAGE",
+     "links": null
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "SelectiveMatte"
+   },
+   "widgets_values": [
+    "your_plate.mp4",
+    "Best (v12, 2 LTX passes)",
+    "full shot",
+    "{}",
+    "selective_matte/shot",
+    "png16",
+    "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
+    "ltx-2.5-22b-ic-lora-alpha-gen-0.9.safetensors",
+    "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+    "ltx-2.5-video-vae-conv-bf16.safetensors",
+    "ltx-2.5-audio-vae-bf16.safetensors",
+    "auto-download",
+    49,
+    40,
+    42,
+    10,
+    15,
+    15,
+    2,
+    0.3,
+    "image",
+    ""
+   ]
+  }
+ ],
+ "links": [],
+ "groups": [],
+ "config": {},
+ "extra": {},
+ "version": 0.4
+}

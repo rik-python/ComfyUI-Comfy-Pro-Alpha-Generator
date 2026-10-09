@@ -1,0 +1,4 @@
+opencv-python-headless
+transformers
+huggingface_hub
+av
