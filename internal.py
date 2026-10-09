@@ -389,13 +389,17 @@ class Final(io.ComfyNode):
             mode = "v12 (best)"
         else:
             alpha, mode = v7, "v7 (fast)"
+        # LTX alpha-gen only mattes what it sees as the main subject: a background car or a prop can come out
+        # empty. Fall back to the ViTMatte edge wherever LTX does not cover the selection.
+        ltx_seen = np.maximum(L, I) if ltx_isolated is not None else L
+        alpha, cover = E.ltx_fallback(alpha, ltx_seen, S, R)
         alpha = np.clip(alpha, 0, 1).astype(np.float32)
 
         out_dir = _save(alpha, filename_prefix, format, first_frame) if save else ""
         score = E.qc(E.to_gray(p), S, L, alpha) if qc else {}
         comp = p * alpha[..., None] + 0.5 * (1 - alpha[..., None])
         info = {"mode": mode, "frames": n, "first_frame": first_frame, "out_dir": out_dir, "format": format,
-                **{k: float(v) for k, v in score.items()}}
+                "ltx_cover": float(np.mean(cover) * 100), **{k: float(v) for k, v in score.items()}}
         ui_out = {"selective_matte": [info], "previews": _previews(p, alpha, max(1, n // 48))}
         return io.NodeOutput(torch.from_numpy(alpha), torch.from_numpy(comp.astype(np.float32)), ui=ui_out)
 
@@ -403,7 +407,7 @@ class Final(io.ComfyNode):
 # ------------------------------------------------------------------ detection report (for the picker UI)
 
 class DetectReport(io.ComfyNode):
-    """Turns SAM3 text detections on one frame into boxes + outline PNGs the picker draws as overlays."""
+    """Turns SAM3 text detections (any subject) on one frame into boxes + mask PNGs the picker draws as overlays."""
 
     @classmethod
     def define_schema(cls):
@@ -421,7 +425,7 @@ class DetectReport(io.ComfyNode):
         tmp = folder_paths.get_temp_directory()
         sub = "selective_matte_detect"
         os.makedirs(os.path.join(tmp, sub), exist_ok=True)
-        people = []
+        subjects = []
         h, w = m.shape[1:]
         for i, mk in enumerate(m):
             ys, xs = np.where(mk > 0.5)
@@ -430,10 +434,10 @@ class DetectReport(io.ComfyNode):
             x0, x1, y0, y1 = xs.min() / w, (xs.max() + 1) / w, ys.min() / h, (ys.max() + 1) / h
             name = f"det_{token}_{i}.png"
             Image.fromarray(((mk > 0.5) * 255).astype(np.uint8), "L").save(os.path.join(tmp, sub, name))
-            people.append({"id": len(people), "box": [(x0 + x1) / 2, (y0 + y1) / 2, x1 - x0, y1 - y0],
+            subjects.append({"id": len(subjects), "box": [(x0 + x1) / 2, (y0 + y1) / 2, x1 - x0, y1 - y0],
                            "area": float((mk > 0.5).mean()),
                            "mask": {"filename": name, "subfolder": sub, "type": "temp"}})
-        return io.NodeOutput(ui={"selective_matte_detect": [{"frame": frame, "token": token, "people": people}]})
+        return io.NodeOutput(ui={"selective_matte_detect": [{"frame": frame, "token": token, "subjects": subjects}]})
 
 
 class PartReport(io.ComfyNode):

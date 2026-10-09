@@ -171,6 +171,27 @@ def v12_blend(v7, v11, sel, others, near_px=15):
     return wgt * v7 + (1 - wgt) * v11
 
 
+def ltx_fallback(alpha, ltx, sel, refined, core_px=10, lo=0.3, hi=0.7):
+    """Per frame: how much of the selection's core LTX covers. Where LTX misses the subject (it only mattes what
+    it reads as the main subject), blend toward the ViTMatte matte. People: cover ~1, alpha unchanged.
+    Returns (alpha, cover per frame)."""
+    n = len(alpha)
+    cover = np.ones(n, np.float32)
+    for f in range(n):
+        s = sel[f] > 0.5
+        core = cv2.erode(s.astype(np.uint8), ellipse(core_px)).astype(bool)
+        core = core if core.any() else s
+        if core.any():
+            cover[f] = float(ltx[f][core].mean())
+    if n > 2:  # smooth over time so the fallback never pops between frames
+        k = np.array([1, 2, 3, 2, 1], np.float32) / 9
+        cover_s = np.convolve(np.pad(cover, 2, mode="edge"), k, mode="valid")
+    else:
+        cover_s = cover
+    w = np.clip((cover_s - lo) / (hi - lo), 0, 1)[:, None, None]
+    return w * alpha + (1 - w) * refined, cover
+
+
 # ---------------------------------------------------------------- LTX chunking (run_ltx_chunks.py)
 
 def chunk_starts(n, chunk, stride):

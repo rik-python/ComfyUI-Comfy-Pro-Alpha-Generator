@@ -1,4 +1,5 @@
-"""Selective Matte: one node, ONYX-style. Pick a person in the plate, get an LTX-quality alpha for only them.
+"""Selective Matte: one node, ONYX-style. Pick a subject (person, animal, vehicle, prop) in the plate, get an
+LTX-quality alpha for only that subject.
 
 At run time the node expands into SAM3 tracks -> selection / ViTMatte / stabilize -> LTX alpha-gen (chunked)
 -> [isolated plate -> LTX again] -> v12 blend -> save. Each stage is cached separately.
@@ -73,8 +74,8 @@ class SelectiveMatte(io.ComfyNode):
             node_id="SelectiveMatte",
             display_name="Selective Matte",
             category="SelectiveMatte",
-            description="Matte ONE chosen person with LTX-2.5 alpha-gen edge quality. Click Detect people, click the "
-                        "person, alt-click to cut parts (someone else's hand), shift-click to add parts (own hand).",
+            description="Matte ONE chosen subject with LTX-2.5 alpha-gen edge quality. Type what to find (person, dog, "
+                        "car...), click Detect, click the subject; alt-click cuts parts, shift-click adds parts.",
             enable_expand=True,
             is_output_node=True,
             inputs=[
@@ -104,7 +105,7 @@ class SelectiveMatte(io.ComfyNode):
                 io.Int.Input("stride", default=40, min=1, max=144),
                 io.Int.Input("seed", default=42, min=0, max=2**31 - 1, control_after_generate=False),
                 io.Int.Input("erode", default=10, min=0, max=64), io.Int.Input("dilate", default=15, min=1, max=64),
-                io.Int.Input("near_px", default=15, min=1, max=64, tooltip="v7 zone around other people (Best)"),
+                io.Int.Input("near_px", default=15, min=1, max=64, tooltip="v7 zone around other excluded subjects (Best)"),
                 io.Int.Input("stabilize_radius", default=2, min=0, max=6),
                 io.Float.Input("sam3_threshold", default=0.3, min=0.0, max=1.0, step=0.01),
                 io.Boolean.Input("fast_attention", default=True, tooltip=(
@@ -126,7 +127,7 @@ class SelectiveMatte(io.ComfyNode):
         except ValueError:
             return "picks is not valid JSON"
         if not p.get("target"):
-            return "No subject picked: click 'Detect people', then click the person to matte."
+            return "No subject picked: click 'Detect', then click the subject to matte."
         return True
 
     @classmethod

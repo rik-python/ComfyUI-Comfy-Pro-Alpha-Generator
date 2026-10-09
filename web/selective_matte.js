@@ -1,8 +1,9 @@
 /**
  * Selective Matte picker + result viewer.
  *
- * Picker: scrub the plate, "Detect people" (SAM3 text "person" on this frame), click a person = target
- * (every other detected person is excluded automatically), Alt-click = cut a part (someone else's hand),
+ * Picker: scrub the plate, type what to find ("person", "dog, bike"...), Detect (SAM3 text detection on this
+ * frame), click a subject = target (other detections near it are excluded automatically),
+ * Alt-click = cut a part (someone else's hand),
  * Shift-click = add a part (own hand SAM3 missed), Ctrl-click = remove the nearest cut/add.
  * Viewer: after a run, wipe between plate and matte comp, scrub, QC badge.
  */
@@ -15,13 +16,15 @@ const ADVANCED = ["chunk", "stride", "fast_attention",
 const HIDDEN = ["picks", "render"];
 const COLORS = ["#4aa3ff", "#b07cff", "#3fd0c9", "#e6d94a", "#ff6fb5", "#8bd450", "#ff9d5c", "#9aa4b2"];
 const TARGET = "#ff8a1f", CUT = "#ff4d4d", ADD = "#3ddc84";
+const MAX_OTHERS = 8;  // excluded detections (one SAM3 track each)
 
 const css = `
 .sm-root{display:flex;flex-direction:column;gap:6px;font:12px/1.3 system-ui,sans-serif;color:#ddd;width:100%;height:100%;box-sizing:border-box}
 .sm-bar{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
 .sm-btn{background:#2b2f36;border:1px solid #444b55;color:#eee;border-radius:6px;padding:4px 10px;cursor:pointer;font:inherit}
 .sm-btn:hover{background:#363b44}.sm-btn.primary{background:#ff8a1f;border-color:#ff8a1f;color:#111;font-weight:600}
-.sm-btn.ghost{background:transparent}.sm-btn:disabled{opacity:.45;cursor:default}
+.sm-btn.ghost{background:transparent}
+.sm-input{background:#1b1e23;border:1px solid #444b55;color:#eee;border-radius:6px;padding:4px 8px;font:inherit;width:150px}.sm-btn:disabled{opacity:.45;cursor:default}
 .sm-view{position:relative;flex:1 1 auto;min-height:120px;background:#111;border-radius:8px;overflow:hidden}
 .sm-view canvas{position:absolute;inset:0;width:100%;height:100%}
 .sm-hint{position:absolute;left:8px;bottom:8px;right:8px;background:#000a;border-radius:6px;padding:4px 8px;pointer-events:none}
@@ -154,7 +157,7 @@ class Picker {
         this.info = null;          // plate proxy: {frames, width, height, fingerprint, subfolder, first_frame}
         this.frame = 0;
         this.img = null;           // current plate frame
-        this.people = [];          // detections on picks.detect.frame: {id, box, area, mask, overlay}
+        this.subjects = [];          // detections on picks.detect.frame: {id, box, area, mask, overlay}
         this.parts = {};           // token -> overlay
         this.result = null;        // {info, previews, view}
         this.tab = "pick";
@@ -191,10 +194,21 @@ class Picker {
         this.loadBtn = el("button", "sm-btn", "Load plate");
         this.loadBtn.title = "Run the nodes feeding 'images' and show the plate here (again after changing crop/resize)";
         this.loadBtn.onclick = () => this.loadPlate();
-        this.detectBtn = el("button", "sm-btn primary", "Detect people");
+        this.promptBox = el("input", "sm-input");
+        this.promptBox.placeholder = "person, dog, bike…";
+        this.promptBox.title = "What to detect. Comma-separate several (e.g. 'dog, person' to also exclude people)";
+        this.promptBox.value = this.picks.prompt || this.picks.detect?.prompt || "person";
+        // Keys typed here must not reach the graph canvas (Delete, Ctrl+C, space...).
+        for (const ev of ["keydown", "keyup", "keypress"]) this.promptBox.addEventListener(ev, (e) => e.stopPropagation());
+        this.promptBox.addEventListener("keydown", (e) => { if (e.key === "Enter") this.detect(); });
+        this.promptBox.addEventListener("change", () => { this.picks.prompt = this.promptText(); this.writePicks(); });
+        this.detectBtn = el("button", "sm-btn primary", "Detect");
         this.detectBtn.onclick = () => this.detect();
         const clear = el("button", "sm-btn ghost", "Clear picks");
-        clear.onclick = () => { this.picks = { cuts: [], adds: [], others: [], detect: this.picks.detect }; this.writePicks(); this.render(); };
+        clear.onclick = () => {
+            this.picks = { cuts: [], adds: [], others: [], detect: this.picks.detect, prompt: this.picks.prompt };
+            this.writePicks(); this.render();
+        };
         this.previewBtn = el("button", "sm-btn", "Preview chunk");
         this.previewBtn.title = "Render the first 49 frames from the pick frame";
         this.previewBtn.onclick = () => this.queue(true);
@@ -202,7 +216,7 @@ class Picker {
         run.onclick = () => this.queue(false);
         this.advBtn = el("button", "sm-btn ghost", "⚙ Advanced");
         this.advBtn.onclick = () => this.toggleAdvanced();
-        bar.append(this.tabs, this.loadBtn, this.detectBtn, clear, this.previewBtn, run, this.advBtn);
+        bar.append(this.tabs, this.loadBtn, this.promptBox, this.detectBtn, clear, this.previewBtn, run, this.advBtn);
 
         const view = el("div", "sm-view");
         this.canvas = el("canvas");
@@ -277,7 +291,7 @@ class Picker {
                 this.picks.stale = true;  // plate changed (crop/resize/new clip) after picking
             } else if (changed) {
                 this.picks = { cuts: [], adds: [], others: [], view: info };
-                this.people = []; this.parts = {};
+                this.subjects = []; this.parts = {};
             }
             this.writePicks();
             this.slider.max = info.frames - 1;
@@ -314,7 +328,7 @@ class Picker {
         };
         this.status.replaceChildren(
             chip(TARGET, p.target ? `target #${p.target.id + 1} (frame ${this.num(p.target.frame)})` : "no target"),
-            chip(COLORS[0], `excluded people ${p.others.length}`),
+            chip(COLORS[0], `excluded ${p.others.length}`),
             chip(CUT, `cuts ${p.cuts.length}`),
             chip(ADD, `adds ${p.adds.length}`),
         );
@@ -332,15 +346,15 @@ class Picker {
 
     async restoreDetections() {
         const d = this.picks.detect;
-        this.people = [];
+        this.subjects = [];
         if (!d) return;
-        for (const saved of d.people) {
+        for (const saved of d.subjects || d.people || []) {  // `people`: picks saved before any-subject detection
             const p = { ...saved };  // overlays stay out of the picks JSON (pixel arrays would bloat the workflow)
             try { p.overlay = tintMask(await loadImage(viewUrl(p.mask)), COLORS[p.id % COLORS.length]); }
             catch { p.overlay = null; }  // temp files are gone after a restart: fall back to boxes
-            this.people.push(p);
+            this.subjects.push(p);
         }
-        this.framePeople = { [d.frame]: this.people };
+        this.frameSubjects = { [d.frame]: this.subjects };
         for (const [kind, color] of [["cuts", CUT], ["adds", ADD]]) {
             for (const part of this.picks[kind]) {
                 if (!part.mask) continue;
@@ -369,19 +383,29 @@ class Picker {
         this.render();
     }
 
-    /** SAM3 "person" detections on one frame (masks as overlays). Does not touch picks. */
-    async detectOn(frame) {
-        const token = Math.random().toString(36).slice(2, 10);
-        const out = await this.helper((images) => ({
-            f: { class_type: "SelectiveMatte_Frame", inputs: { images, index: frame } },
-            m: { class_type: "LoadSAM3Model", inputs: { precision: "auto" } },
-            g: { class_type: "SAM3Grounding", inputs: { sam3_model_config: ["m", 0], image: ["f", 0], confidence_threshold: 0.3,
-                                                       text_prompt: "person", max_detections: -1 } },
-            r: { class_type: "SelectiveMatte_DetectReport", inputs: { masks: ["g", 0], frame, token } },
-        }), "r", "selective_matte_detect");
-        const people = out.people.sort((a, b) => a.box[0] - b.box[0]).map((p, i) => ({ ...p, id: i }));
-        for (const p of people) p.overlay = tintMask(await loadImage(viewUrl(p.mask)), COLORS[p.id % COLORS.length]);
-        return people;
+    /** The detect prompt as typed, normalised ("dog,  person" -> "dog, person"); "person" when empty. */
+    promptText() {
+        const terms = this.promptBox.value.split(",").map((t) => t.trim()).filter(Boolean);
+        return terms.length ? terms.join(", ") : "person";
+    }
+
+    /** SAM3 text detections on one frame, one pass per comma-separated term (masks as overlays). Does not touch picks. */
+    async detectOn(frame, prompt) {
+        const found = [];
+        for (const term of prompt.split(",").map((t) => t.trim()).filter(Boolean)) {
+            const token = Math.random().toString(36).slice(2, 10);
+            const out = await this.helper((images) => ({
+                f: { class_type: "SelectiveMatte_Frame", inputs: { images, index: frame } },
+                m: { class_type: "LoadSAM3Model", inputs: { precision: "auto" } },
+                g: { class_type: "SAM3Grounding", inputs: { sam3_model_config: ["m", 0], image: ["f", 0], confidence_threshold: 0.3,
+                                                           text_prompt: term, max_detections: -1 } },
+                r: { class_type: "SelectiveMatte_DetectReport", inputs: { masks: ["g", 0], frame, token } },
+            }), "r", "selective_matte_detect");
+            found.push(...(out.subjects || out.people || []).map((p) => ({ ...p, label: term })));
+        }
+        const subjects = found.sort((a, b) => a.box[0] - b.box[0]).map((p, i) => ({ ...p, id: i }));
+        for (const p of subjects) p.overlay = tintMask(await loadImage(viewUrl(p.mask)), COLORS[p.id % COLORS.length]);
+        return subjects;
     }
 
     async detect() {
@@ -390,11 +414,14 @@ class Picker {
         try {
             if (!this.info) await this.loadPlate();
             if (!this.info) return;
-            const people = await this.detectOn(this.frame);
-            this.framePeople = { [this.frame]: people };
-            this.picks = { cuts: this.picks.cuts, adds: this.picks.adds, others: [], view: this.info,
-                           detect: { frame: this.frame, people: people.map(({ overlay, ...p }) => p) } };
-            this.people = people;
+            const prompt = this.promptText();
+            this.promptBox.value = prompt;
+            const subjects = await this.detectOn(this.frame, prompt);
+            if (!subjects.length) { alert(`Selective Matte: no "${prompt}" found on this frame. Try another word or frame.`); return; }
+            this.frameSubjects = { [this.frame]: subjects };
+            this.picks = { cuts: this.picks.cuts, adds: this.picks.adds, others: [], view: this.info, prompt,
+                           detect: { frame: this.frame, prompt, subjects: subjects.map(({ overlay, ...p }) => p) } };
+            this.subjects = subjects;
             this.writePicks();
             this.tab = "pick";
             this.render();
@@ -402,26 +429,26 @@ class Picker {
             alert(`Selective Matte: detection failed\n${e.message}`);
         } finally {
             this.detectBtn.disabled = false;
-            this.detectBtn.textContent = "Detect people";
+            this.detectBtn.textContent = "Detect";
         }
     }
 
-    /** People on `frame` plus which of them is the target (nearest to the picked target box). */
-    async peopleOn(frame) {
-        this.framePeople = this.framePeople || {};
-        if (frame === this.picks.detect?.frame && this.people.length) this.framePeople[frame] = this.people;
-        if (!this.framePeople[frame]) this.framePeople[frame] = await this.detectOn(frame);
-        const people = this.framePeople[frame];
+    /** Detections on `frame` (pick-frame prompt) plus which one is the target (nearest to the target box). */
+    async subjectsOn(frame) {
+        this.frameSubjects = this.frameSubjects || {};
+        if (frame === this.picks.detect?.frame && this.subjects.length) this.frameSubjects[frame] = this.subjects;
+        if (!this.frameSubjects[frame]) this.frameSubjects[frame] = await this.detectOn(frame, this.picks.detect?.prompt || "person");
+        const subjects = this.frameSubjects[frame];
         const t = this.picks.target;
         let target = null;
         if (t) {
-            if (frame === t.frame) target = people.find((p) => p.id === t.id) || null;
+            if (frame === t.frame) target = subjects.find((p) => p.id === t.id) || null;
             if (!target) {
                 const cost = (p) => Math.hypot(p.box[0] - t.box[0], p.box[1] - t.box[1]) + Math.abs(p.box[3] - t.box[3]);
-                target = [...people].sort((a, b) => cost(a) - cost(b))[0] || null;
+                target = [...subjects].sort((a, b) => cost(a) - cost(b))[0] || null;
             }
         }
-        return { people, target };
+        return { subjects, target };
     }
 
     async addPart(kind, x, y) {
@@ -431,16 +458,16 @@ class Picker {
         this.writePicks();
         this.render();
         try {
-            // Auto negative points so one click gives a PART, never a whole person:
-            //  add -> "not the neighbours" (centres of other people near the click)
+            // Auto negative points so one click gives a PART, never a whole subject:
+            //  add -> "not the neighbours" (centres of other detections near the click)
             //  cut -> "not the subject" (centre of the target)
-            const { people, target } = await this.peopleOn(part.frame);
+            const { subjects, target } = await this.subjectsOn(part.frame);
             const near = (p) => {
                 const [cx, cy, w, h] = p.box;
                 return Math.abs(x - cx) < w / 2 + 0.05 && Math.abs(y - cy) < h / 2 + 0.05;
             };
-            const negPeople = kind === "adds" ? people.filter((p) => p !== target && near(p)) : (target ? [target] : []);
-            part.neg = negPeople.map((p) => interiorPoint(p.overlay, x, y)).filter(Boolean);
+            const negSubjects = kind === "adds" ? subjects.filter((p) => p !== target && near(p)) : (target ? [target] : []);
+            part.neg = negSubjects.map((p) => interiorPoint(p.overlay, x, y)).filter(Boolean);
 
             const n = {
                 f: { class_type: "SelectiveMatte_Frame", inputs: { images: null, index: part.frame } },
@@ -466,12 +493,12 @@ class Picker {
             part.mask = out.mask;
             const ov = tintMask(await loadImage(viewUrl(out.mask)), kind === "cuts" ? CUT : ADD);
             this.parts[token] = ov;
-            // Safety: an add must not swallow another person, a cut must not swallow the subject.
-            const victims = kind === "adds" ? people.filter((p) => p !== target) : (target ? [target] : []);
+            // Safety: an add must not swallow another detection, a cut must not swallow the subject.
+            const victims = kind === "adds" ? subjects.filter((p) => p !== target) : (target ? [target] : []);
             const bad = victims.find((p) => coverage(ov, p.overlay) > 0.4);
             part.warning = bad ? (kind === "adds"
-                ? `This add grabbed person #${bad.id + 1}. Ctrl-click it to remove, then click closer to the hand.`
-                : "This cut grabbed the subject. Ctrl-click it to remove, then click right on the other person's hand.") : null;
+                ? `This add grabbed #${bad.id + 1} ${bad.label || ""}. Ctrl-click it to remove, then click closer to the part.`
+                : "This cut grabbed the subject. Ctrl-click it to remove, then click right on the part to cut.") : null;
             this.writePicks();
             this.render();
         } catch (e) {
@@ -482,7 +509,7 @@ class Picker {
     }
 
     async queue(preview) {
-        if (!this.picks.target) { alert("Selective Matte: click 'Detect people', then click the person to matte."); return; }
+        if (!this.picks.target) { alert("Selective Matte: click 'Detect', then click the subject to matte."); return; }
         if (this.picks.stale && !confirm("The plate changed after you picked the subject. Run anyway?")) return;
         const r = this.w.render;
         r.value = preview ? "preview chunk" : "full shot";
@@ -509,17 +536,17 @@ class Picker {
         if (e.ctrlKey || e.metaKey) return this.removeNearest(x, y);
         if (e.altKey) return this.addPart("cuts", x, y);
         if (e.shiftKey) return this.addPart("adds", x, y);
-        this.pickPerson(x, y);
+        this.pickSubject(x, y);
     }
 
-    pickPerson(x, y) {
+    pickSubject(x, y) {
         const d = this.picks.detect;
         if (!d || d.frame !== this.frame) {
-            alert(d ? `Detections are on frame ${this.num(d.frame)}. Scrub there, or Detect people on this frame.` : "Click 'Detect people' first.");
+            alert(d ? `Detections are on frame ${this.num(d.frame)}. Scrub there, or Detect on this frame.` : "Type what to find, then click 'Detect' first.");
             return;
         }
-        // Smallest person whose mask (or box) contains the click: front-most when people overlap.
-        const hits = this.people.filter((p) => {
+        // Smallest detection whose mask (or box) contains the click: front-most when detections overlap.
+        const hits = this.subjects.filter((p) => {
             if (p.overlay) {
                 const o = p.overlay;
                 return o.hit[Math.floor(y * o.h) * o.w + Math.floor(x * o.w)] === 1;
@@ -532,11 +559,13 @@ class Picker {
         this.picks.target = { id: t.id, frame: d.frame, box: t.box };
         this.picks.plate = this.info?.fingerprint;
         delete this.picks.stale;
-        // Only people near the target need painting out; far ones are dropped later by connectivity anyway,
-        // and every excluded person costs one SAM3 track.
-        const [tx, ty, tw, th] = t.box, gx = tw * 0.65, gy = th * 0.65;
-        const near = (p) => Math.abs(p.box[0] - tx) < gx + p.box[2] / 2 && Math.abs(p.box[1] - ty) < gy + p.box[3] / 2;
-        this.picks.others = this.people.filter((p) => p.id !== t.id && near(p)).map((p) => ({ id: p.id, frame: d.frame, box: p.box }));
+        // Exclude every other detection, not only the ones near the target on this frame: subjects move (a dog that
+        // starts far away can run alongside the target later, and then LTX would keep it as attached). Each one
+        // costs a SAM3 track, so keep the nearest MAX_OTHERS.
+        const [tx, ty] = t.box;
+        const dist = (p) => Math.hypot(p.box[0] - tx, p.box[1] - ty);
+        this.picks.others = this.subjects.filter((p) => p.id !== t.id).sort((a, b) => dist(a) - dist(b)).slice(0, MAX_OTHERS)
+            .map((p) => ({ id: p.id, frame: d.frame, box: p.box }));
         this.writePicks();
         this.render();
     }
@@ -569,7 +598,7 @@ class Picker {
         const d = this.picks.detect;
         const onDetect = d && d.frame === this.frame;
         if (onDetect) {
-            for (const p of this.people) {
+            for (const p of this.subjects) {
                 const isT = this.picks.target?.id === p.id;
                 const color = isT ? TARGET : COLORS[p.id % COLORS.length];
                 if (p.overlay) {
@@ -584,10 +613,13 @@ class Picker {
                 g.setLineDash(isT ? [] : [4, 4]);
                 g.strokeRect(bx, by, w * r.w, h * r.h);
                 g.setLineDash([]);
+                const tag = p.label ? `${p.id + 1} ${p.label}` : String(p.id + 1);
+                g.font = "bold 12px system-ui"; g.textAlign = "left"; g.textBaseline = "middle";
+                const tw = g.measureText(tag).width + 12;
                 g.fillStyle = color;
-                g.beginPath(); g.arc(bx + 12, by + 12, 10, 0, Math.PI * 2); g.fill();
-                g.fillStyle = "#111"; g.font = "bold 12px system-ui"; g.textAlign = "center"; g.textBaseline = "middle";
-                g.fillText(String(p.id + 1), bx + 12, by + 12);
+                g.beginPath(); g.roundRect(bx + 2, by + 2, tw, 20, 10); g.fill();
+                g.fillStyle = "#111";
+                g.fillText(tag, bx + 8, by + 12);
             }
         }
         for (const [kind, color, sym] of [["cuts", CUT, "×"], ["adds", ADD, "+"]]) {
@@ -604,12 +636,12 @@ class Picker {
         const warn = [...this.picks.cuts, ...this.picks.adds].find((p) => p.warning);
         this.hint.style.background = warn || this.picks.stale ? "#7a1f1fdd" : "";
         this.hint.textContent = warn ? `⚠ ${warn.warning}`
-            : this.picks.stale ? "⚠ The plate changed (crop/resize/new clip) after picking: Detect people again."
+            : this.picks.stale ? "⚠ The plate changed (crop/resize/new clip) after picking: Detect again."
             : !this.info ? "Connect the plate to 'images', then click Load plate."
-            : !d ? "Scrub to a frame where the person is fully visible, then click Detect people."
+            : !d ? "Scrub to a frame where the subject is fully visible, type what to find (person, dog, car…), click Detect."
             : !onDetect ? `Detections live on frame ${this.num(d.frame)}. Cuts/adds can go on any frame (place them where the part first appears).`
-            : !this.picks.target ? "Click the person to matte. Every other detected person is excluded."
-            : "Alt-click: cut a part (someone else's hand).  Shift-click: add a part (own hand).  Ctrl-click: remove.";
+            : !this.picks.target ? "Click the subject to matte. Other detections near it are excluded."
+            : "Alt-click: cut a part (someone else's hand).  Shift-click: add a part SAM3 missed.  Ctrl-click: remove.";
     }
 
     renderResult(g) {
@@ -648,13 +680,27 @@ class Picker {
         this.tab = "result";
         const badge = (label, value, cls) => el("span", `sm-badge ${cls}`, `${label} ${value}`);
         const kids = [];
-        if (info.flicker_x != null) {
+        // Flicker and soft edge are measured against LTX alone: meaningless when LTX barely matted the subject.
+        const vsLtx = info.ltx_cover == null || info.ltx_cover >= 60;
+        if (!vsLtx) {
+            const b = badge("flicker / soft edge", "n/a", "");
+            b.style.background = "#9aa4b2";
+            b.title = "Measured against LTX, which did not matte this subject: mostly a ViTMatte result. Judge by eye.";
+            kids.push(b);
+        } else if (info.flicker_x != null) {
             const f = info.flicker_x;
             kids.push(badge("flicker", `${f.toFixed(2)}× LTX`, f <= 1.3 ? "sm-g" : f <= 2 ? "sm-a" : "sm-r"));
         }
-        if (info.hair_pct != null) {
-            const h = info.hair_pct;
-            kids.push(badge("hair kept", `${h.toFixed(1)}%`, h >= 95 ? "sm-g" : h >= 85 ? "sm-a" : "sm-r"));
+        if (vsLtx && info.hair_pct != null) {
+            const h = Math.min(info.hair_pct, 100);  // the isolated pass can keep MORE soft edge than LTX alone
+            kids.push(badge("soft edge kept", `${h.toFixed(1)}%`, h >= 95 ? "sm-g" : h >= 85 ? "sm-a" : "sm-r"));
+        }
+        if (info.ltx_cover != null) {
+            const c = info.ltx_cover;
+            const b = badge("LTX cover", `${c.toFixed(0)}%`, c >= 90 ? "sm-g" : c >= 60 ? "sm-a" : "sm-r");
+            b.title = "How much of the subject LTX alpha-gen matted. Low: LTX did not see it as the main subject, "
+                    + "so those frames use the ViTMatte edge instead.";
+            kids.push(b);
         }
         const tog = el("button", "sm-btn ghost", "comp / alpha");
         tog.onclick = () => { this.result.view = this.result.view === "alpha" ? "comp" : "alpha"; this.render(); };

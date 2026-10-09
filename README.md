@@ -1,7 +1,8 @@
 # ComfyUI-SelectiveMatte
 
-One node that mattes **one chosen person** in a multi-person shot, with **LTX-2.5 alpha-gen** edge and hair quality.
-LTX alpha-gen mattes everyone and can't be told who. This node lets SAM3 pick the subject, then lets LTX draw the edges.
+One node that mattes **one chosen subject** (a person, animal, vehicle or prop) in a busy shot, with **LTX-2.5 alpha-gen**
+edge and hair quality. LTX alpha-gen mattes every main subject and can't be told which one. This node lets SAM3 pick the
+subject from a word you type, then lets LTX draw the edges.
 
 ## Using it
 
@@ -20,8 +21,16 @@ LTX alpha-gen mattes everyone and can't be told who. This node lets SAM3 pick th
    Any nodes can sit in between (crop, resize, colour). The node mattes whatever arrives at `images`.
 2. Click **Load plate** in the node. It runs the nodes feeding `images` and fills the scrubber.
    Click it again whenever you change the crop or the clip. If the plate changes after you picked someone, the node warns you to re-detect.
-3. Scrub to a frame where the person is fully visible, then click **Detect people**.
-4. **Click the person** to matte. They turn orange. Everyone else is excluded automatically.
+3. Scrub to a frame where the subject is fully visible. Type what to find in the box next to **Detect** and press **Detect** (or Enter):
+
+   | Type | Finds |
+   |---|---|
+   | `person` (default) | every person |
+   | `dog`, `red car`, `bike`, `woman` | any SAM3 concept |
+   | `dog, person` | both. Use this to also paint out the people near a dog |
+
+   Each detection is outlined and labelled (`2 dog`).
+4. **Click the subject** to matte. It turns orange. Other detections near it are excluded automatically.
 5. Fix parts if needed, on any frame where the part is visible:
 
    | Action | What it does |
@@ -32,10 +41,10 @@ LTX alpha-gen mattes everyone and can't be told who. This node lets SAM3 pick th
 
    Place a cut or add on the **first frame** that part appears. Tracking only runs forward.
    Each click gets automatic "not this" points, so a single click gives just the part:
-   - **Add:** the nearby other people are marked "not this".
+   - **Add:** the other detections nearby are marked "not this".
    - **Cut:** the subject is marked "not this".
 
-   The part shows as a red or green overlay. If a click still grabs a whole person, a red warning tells you to Ctrl-click it away and click closer to the hand.
+   The part shows as a red or green overlay. If a click still grabs a whole subject, a red warning tells you to Ctrl-click it away and click closer to the part.
 6. Click **Preview chunk** (first 49 frames). Check the **Result** tab: drag to wipe plate against comp, and press `comp / alpha` to switch views.
 7. Click **Run full shot**.
 
@@ -46,15 +55,16 @@ It is 16-bit PNG by default; set `format` to `exr` for half-float EXR.
 
 | Preset | What it does |
 |---|---|
-| **Best (v12)** | 2 LTX passes. Pass 2 runs on a plate with everyone else painted out, so LTX draws the subject's edges itself. |
-| **Fast (v7)** | 1 LTX pass. About half the time; edges against other people are a little weaker. |
+| **Best (v12)** | 2 LTX passes. Pass 2 runs on a plate with the other detections painted out, so LTX draws the subject's edges itself. |
+| **Fast (v7)** | 1 LTX pass. About half the time; edges against other subjects are a little weaker. |
 
 **QC badge** (shown after each run)
 
 | Badge | Meaning | Green when |
 |---|---|---|
 | flicker | Motion-compensated flicker, compared with LTX alone | ≤ 1.3x |
-| hair kept | Share of LTX's soft hair edge that survived | ≥ 95% |
+| soft edge kept | Share of LTX's soft edge (hair, fur, dust) that survived | ≥ 95% |
+| LTX cover | How much of the subject LTX matted. Where it is low, the node uses the ViTMatte edge instead | ≥ 90% |
 
 **Models** are always visible on the node: LTX model, alpha-gen IC-LoRA, text encoder, video VAE, audio VAE, ViTMatte. Hover a model selector to see the recommended file and its folder.
 After you copy model files into the folders, press **R** in ComfyUI to refresh the lists. A missing model is reported by name when you queue.
@@ -98,9 +108,10 @@ On **Queue**, the node expands into a normal ComfyUI graph:
 2. Build the selection, then refine it with ViTMatte.
 3. **Stabilize** the selection and ViTMatte edges over time with optical flow.
 4. **LTX pass 1** on the plate, chunked and cross-faded.
-5. **Isolated plate**: everyone else inpainted out.
+5. **Isolated plate**: the other detections inpainted out.
 6. **LTX pass 2** on the isolated plate.
-7. **v12 blend**: LTX edges everywhere, with ViTMatte within about 15 px of other people (where LTX has no edge information).
+7. **v12 blend**: LTX edges everywhere, with ViTMatte within about 15 px of other subjects (where LTX has no edge information).
+   Frames where LTX did not matte the subject (low LTX cover) blend to the ViTMatte matte.
 8. Save the alpha and write the QC scores.
 
 Each stage is its own cached node. Changing the quality preset, or running the full shot after a preview, reuses the stages that already finished.
@@ -108,6 +119,12 @@ Each stage is its own cached node. Changing the quality preset, or running the f
 ## Limits
 
 - Tracks start at the frame you detected on. Frames before it come out empty.
-- Where two people overlap, the edge position between them comes from SAM3/ViTMatte, not LTX.
+- Where two subjects overlap, the edge position between them comes from SAM3/ViTMatte, not LTX.
+- LTX alpha-gen mattes what it reads as the **main** subject. It mattes cars, dust and people well, but a background
+  object (a parked car behind the action) can come out empty. Then the LTX cover badge goes red and the node uses
+  the ViTMatte edge (ONYX-style quality, no LTX hair detail). Flicker and soft edge then show n/a (they compare against LTX).
+- Up to 8 other detections (nearest first) are excluded. Each costs a SAM3 track, about 14 s on a preview.
+- If something fully covers the subject (a car driving in front of it), SAM3 can lose the track for the rest of
+  the shot. Pick on a frame after the occlusion, or split the shot.
 - Light fringes on hair are colour spill from the plate. Despill in comp.
 - Shots are limited to 24 chunks (about 960 frames at stride 40). Split longer shots.
