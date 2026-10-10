@@ -237,7 +237,8 @@ def ltx_frames(n):
 # ---------------------------------------------------------------- QC (measure_matte.py)
 
 def qc(gray, sel, ltx, alpha, others=None):
-    """Motion-compensated flicker ratio vs LTX alone + share of LTX hair kept. Returns dict."""
+    """Motion-compensated flicker ratio vs LTX alone + edge detail match vs LTX (1 - sum|alpha - LTX| / sum LTX on
+    LTX's soft pixels near the subject: filling the gaps between strands and missing strands both count). Returns dict."""
     n, h, w = gray.shape
     if n < 3:
         return {}
@@ -260,7 +261,7 @@ def qc(gray, sel, ltx, alpha, others=None):
         for q, acc in ((ltx, fl_ltx), (alpha, fl_out)):
             pred = 0.5 * (cv2.remap(_f32(q[t - 1]), *maps[0], cv2.INTER_LINEAR) + cv2.remap(_f32(q[t + 1]), *maps[1], cv2.INTER_LINEAR))
             acc.append(np.abs(_f32(q[t]) - pred)[m].mean())
-    tot = kept = 0.0
+    tot = err = 0.0
     for f in range(n):
         T = sel[f] > .5
         lf = _f32(ltx[f])
@@ -269,7 +270,7 @@ def qc(gray, sel, ltx, alpha, others=None):
         dO = cv2.distanceTransform((~O).astype(np.uint8), cv2.DIST_L2, 5)
         hs = (lf > .02) & (lf < .9) & (dT < dO)
         tot += float(lf[hs].sum())
-        kept += float(_f32(alpha[f])[hs].sum())
+        err += float(np.abs(_f32(alpha[f])[hs] - lf[hs]).sum())
     base = float(np.mean(fl_ltx)) if fl_ltx else 0.0
     return {"flicker_x": float(np.mean(fl_out)) / base if base else 0.0,
-            "hair_pct": float(kept / tot * 100) if tot else 100.0}
+            "detail_pct": max(0.0, 1 - err / tot) * 100 if tot else 100.0}

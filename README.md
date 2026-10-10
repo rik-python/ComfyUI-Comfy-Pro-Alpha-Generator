@@ -41,19 +41,19 @@ and each one is missing half of the answer:
 Measured on a 247-frame plate (three kids, arms around each other), matting only the middle kid.
 Every method gets the same SAM3 selection.
 
-<p align="center"><img src="docs/images/quality_scatter.png" width="760" alt="hair kept vs flicker"></p>
+<p align="center"><img src="docs/images/quality_scatter.png" width="760" alt="edge detail match vs flicker"></p>
 
-| Method | Selects one subject | Hair / soft edge kept | Flicker vs LTX alone |
-|---|:---:|:---:|:---:|
-| LTX alpha-gen alone | no (mattes everyone) | 100% *(reference)* | 1.0x |
-| SAM3 mask | yes | 85.2% | 2.6x |
-| ONYX-style: SAM3 + ViTMatte | yes | 90.8% | 1.7x |
-| ONYX-style + temporal stabilizer | yes | 90.3% | **0.5x** |
-| **Comfy Pro Alpha Generator** | **yes** | **97.8%** | 1.2x |
+| Method | Selects one subject | Edge detail match | Hair outside the SAM3 outline | Flicker vs LTX alone |
+|---|:---:|:---:|:---:|:---:|
+| LTX alpha-gen alone | no (mattes everyone) | 100% *(reference)* | 100% | 1.0x |
+| SAM3 mask | yes | 29.4% | 0% | 2.6x |
+| ONYX-style: SAM3 + ViTMatte | yes | 45.0% | 31.3% | 1.7x |
+| ONYX-style + temporal stabilizer | yes | 46.1% | 31.8% | **0.5x** |
+| **Comfy Pro Alpha Generator** | **yes** | **88.7%** | **88.7%** | 1.2x |
 
 **How to read it**
-- **Hair:** it keeps 97.8% of LTX's soft-edge alpha while matting one subject only. The ViTMatte route
-  tops out near 91%: it keeps a soft halo but not the strands (see the zoom above).
+- **Hair:** its edge matches LTX's generative hair at 88.7% while matting one subject only. The ViTMatte route
+  reaches 45%: it keeps a soft halo but not the strands, and a SAM3 mask reaches 29% (see the zoom above).
 - **Stability:** against background, it flickers the same as LTX alone (0.0112 vs 0.0109 mean error per
   pixel). The extra 0.2x comes from the few pixels where the subject touches someone else.
 - **Honest trade-off:** a temporally stabilized ViTMatte matte is *steadier* than LTX (0.5x), because it is smooth
@@ -65,9 +65,14 @@ Every method gets the same SAM3 selection.
 - **Flicker** is motion compensated: each frame is predicted from its neighbours warped by DIS optical flow on the
   plate, and only the subject's outline band where the flow explains the plate (no occlusion) is scored. Plain
   frame-to-frame differences punish sharp edges that move, so they are not used.
-- **Hair kept** is the share of LTX's soft alpha (0.02 to 0.9) that lies nearer the subject than any other person,
-  which each method keeps. It uses LTX as the reference, so it favours LTX-based methods. The hair zoom shows the
-  same difference visually.
+- **Edge detail match** compares each matte with LTX's soft alpha (0.02 to 0.9) on the pixels nearer the subject
+  than any other person: `1 - sum|matte - LTX| / sum(LTX)`. Filling in the gaps between strands and missing strands
+  both count as error. **Hair outside the SAM3 outline** is the share of LTX's soft alpha beyond the SAM3 mask that
+  a method recovers (a hard mask scores 0% by definition). Both use LTX as the reference, so they favour LTX-based
+  methods; the hair zoom shows the same difference visually.
+- An earlier version of this table used "hair kept", the plain sum of each matte over those pixels (SAM3 85.2%,
+  ONYX-style 90.8%, this node 97.8%). It gave a solid mask credit for filling the gaps between strands, so it
+  hid most of the difference and was replaced.
 - **ONYX-style** is an emulation of ONYX Ai Matte v3's published pipeline (SAM3, then a trimap with erode 10 /
   dilate 15, then ViTMatte, per frame), plus this node's optical-flow stabilizer for the "+ stabilizer" row.
   The commercial ONYX plugin itself was not tested.
@@ -199,7 +204,7 @@ The node walks you through three steps (**Plate → Subject → Render**); it on
 | Badge | Meaning | Green when |
 |---|---|---|
 | flicker | Motion-compensated flicker vs LTX alone | ≤ 1.3x |
-| soft edge kept | Share of LTX's soft edge (hair, fur, dust) that survived | ≥ 95% |
+| detail match | How closely the edge matches LTX's hair, fur and dust | ≥ 80% |
 | LTX cover | How much of the subject LTX matted (the rest uses ViTMatte) | ≥ 90% |
 
 `⚙ Advanced`: frames per chunk, overlap frames, seed, temporal smoothing, trimap erode/dilate, the zone near other

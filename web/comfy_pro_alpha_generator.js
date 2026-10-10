@@ -1020,9 +1020,11 @@ class Picker {
             const f = info.flicker_x;
             kids.push(badge("flicker", `${f.toFixed(2)}× LTX`, f <= 1.3 ? "sm-g" : f <= 2 ? "sm-a" : "sm-r"));
         }
-        if (vsLtx && info.hair_pct != null) {
-            const h = Math.min(info.hair_pct, 100);  // the isolated pass can keep MORE soft edge than LTX alone
-            kids.push(badge("soft edge kept", `${h.toFixed(1)}%`, h >= 95 ? "sm-g" : h >= 85 ? "sm-a" : "sm-r"));
+        if (vsLtx && info.detail_pct != null) {
+            const d = info.detail_pct;  // edge vs LTX alone: kids benchmark 88.7% (ViTMatte 45%, SAM3 mask 29%)
+            const b = badge("detail match", `${d.toFixed(1)}%`, d >= 80 ? "sm-g" : d >= 60 ? "sm-a" : "sm-r");
+            b.title = "How closely the edge matches LTX alpha-gen's hair and soft detail (100% = identical).";
+            kids.push(b);
         }
         if (info.ltx_cover != null) {
             const c = info.ltx_cover;
