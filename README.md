@@ -1,6 +1,6 @@
 <div align="center">
 
-# Selective Matte
+# Comfy-Pro-Alpha-Generator
 
 **Generative-quality mattes for one chosen subject. One ComfyUI node.**
 
