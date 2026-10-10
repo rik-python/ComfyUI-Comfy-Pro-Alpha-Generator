@@ -1,44 +1,170 @@
-# ComfyUI-SelectiveMatte
+<div align="center">
 
-One node that mattes **one chosen subject** (a person, animal, vehicle or prop) in a busy shot, with **LTX-2.5 alpha-gen**
-edge and hair quality. LTX alpha-gen mattes every main subject and can't be told which one. This node lets SAM3 pick the
-subject from a word you type, then lets LTX draw the edges.
+# Selective Matte
+
+**Generative-quality mattes for one chosen subject. One ComfyUI node.**
+
+SAM3 decides *what* to matte. LTX-2.5 alpha-gen decides *how the edge looks*.
+
+![ComfyUI](https://img.shields.io/badge/ComfyUI-0.38%2B-0d1117?style=flat-square&labelColor=2dd4bf&color=0d1117)
+![LTX-2.5](https://img.shields.io/badge/LTX--2.5-IC--LoRA%20alpha--gen-0d1117?style=flat-square&labelColor=2dd4bf)
+![SAM3](https://img.shields.io/badge/SAM3-tracking-0d1117?style=flat-square&labelColor=2dd4bf)
+![VRAM](https://img.shields.io/badge/VRAM-12%20GB%2B-0d1117?style=flat-square&labelColor=fb923c)
+![RAM](https://img.shields.io/badge/RAM-16%20GB%2B-0d1117?style=flat-square&labelColor=fb923c)
+![License](https://img.shields.io/badge/license-MIT-0d1117?style=flat-square&labelColor=8b949e)
+
+</div>
+
+![SAM3 vs ONYX-style vs Selective Matte on the same frame](docs/images/hero_compare.jpg)
+
+<sub>Same plate, same subject, same frame. Top: matte over checker. Below: hair zoom as alpha, then comped over green. Only the generative edge keeps the individual strands against the sky.</sub>
+
+---
+
+## The problem
+
+Rotoscoping one person out of a crowd is still the most manual job in compositing. The AI tools split into two camps,
+and each one is missing half of the answer:
+
+| | Picks *which* subject | Edge quality | Why |
+|---|:---:|:---:|---|
+| **LTX-2.5 alpha-gen** (generative) | no | hair-level | Renders the matte jointly over the whole clip, but mattes *every* main subject and can't be told which one. |
+| **SAM3 / ONYX-style** (discriminative) | yes | soft, per-frame | Tracks any object you point at, then *measures* the edge frame by frame with ViTMatte. Strands get lost; edges chatter. |
+| **Selective Matte** | **yes** | **hair-level** | SAM3 steers, LTX draws. Built from both. |
+
+## Results
+
+Measured on a 247-frame plate (three kids, arms around each other), matting only the middle kid.
+Every method gets the same SAM3 selection.
+
+<p align="center"><img src="docs/images/quality_scatter.png" width="760" alt="hair kept vs flicker"></p>
+
+| Method | Selects one subject | Hair / soft edge kept | Flicker vs LTX alone |
+|---|:---:|:---:|:---:|
+| LTX alpha-gen alone | no (mattes everyone) | 100% *(reference)* | 1.0x |
+| SAM3 mask | yes | 85.2% | 2.6x |
+| ONYX-style: SAM3 + ViTMatte | yes | 90.8% | 1.7x |
+| ONYX-style + temporal stabilizer | yes | 90.3% | **0.5x** |
+| **Selective Matte** | **yes** | **97.8%** | 1.2x |
+
+**How to read it**
+- **Hair:** Selective Matte keeps 97.8% of LTX's soft-edge alpha while matting one subject only. The ViTMatte route
+  tops out near 91%: it keeps a soft halo but not the strands (see the zoom above).
+- **Stability:** against background, Selective Matte flickers the same as LTX alone (0.0112 vs 0.0109 mean error per
+  pixel). The extra 0.2x comes from the few pixels where the subject touches someone else.
+- **Honest trade-off:** a temporally stabilized ViTMatte matte is *steadier* than LTX (0.5x), because it is smooth
+  and has no strands left to move. Selective Matte trades that for real hair detail.
+
+<details>
+<summary><b>Methodology</b></summary>
+
+- **Flicker** is motion compensated: each frame is predicted from its neighbours warped by DIS optical flow on the
+  plate, and only the subject's outline band where the flow explains the plate (no occlusion) is scored. Plain
+  frame-to-frame differences punish sharp edges that move, so they are not used.
+- **Hair kept** is the share of LTX's soft alpha (0.02 to 0.9) that lies nearer the subject than any other person,
+  which each method keeps. It uses LTX as the reference, so it favours LTX-based methods. The hair zoom shows the
+  same difference visually.
+- **ONYX-style** is an emulation of ONYX Ai Matte v3's published pipeline (SAM3, then a trimap with erode 10 /
+  dilate 15, then ViTMatte, per frame), plus this node's optical-flow stabilizer for the "+ stabilizer" row.
+  The commercial ONYX plugin itself was not tested.
+- Script: `measure_matte.py` logic, also built into the node as the QC badges.
+
+</details>
+
+### Any subject
+
+<p align="center"><img src="docs/images/any_subject.jpg" width="900" alt="dog, motorbike, kid"></p>
+
+Type a word (`dog`, `red car`, `bike`) or click anything in the frame. The others are excluded automatically,
+including the same class: the white dog out of four, the bike without its rider.
+
+---
+
+## How it works
+
+```mermaid
+flowchart LR
+    P([Plate]) --> S["SAM3 tracks<br/>subject, others, cuts, adds"]
+    S --> R["ViTMatte refine<br/>+ optical-flow stabilize"]
+    P --> L1["LTX-2.5 alpha-gen<br/>pass 1: full plate"]
+    S --> I["Isolated plate<br/>others inpainted out"]
+    P --> I
+    I --> L2["LTX-2.5 alpha-gen<br/>pass 2: subject alone"]
+    L1 --> B{"v12 blend<br/>+ coverage fallback"}
+    L2 --> B
+    R --> B
+    B --> A([16-bit alpha + QC])
+    style B fill:#0d1117,stroke:#2dd4bf,color:#e6edf3
+    style A fill:#2dd4bf,stroke:#2dd4bf,color:#0d1117
+```
+
+**The key ideas**
+
+1. **The isolated plate.** LTX can't be told which subject to matte, so the node changes what LTX *sees*. SAM3
+   finds every other subject, and they are painted out with an **inpainted background** (a flat colour fill gets
+   read as a half-transparent object). LTX then mattes the subject alone and draws every one of its edges itself,
+   including parts SAM3 missed.
+2. **Each tool where it is strong.** Against background, LTX's edge wins. Where the subject overlaps another person,
+   LTX outputs 1.0 on both sides, so there is *no* edge information there. Within about 15 px of other subjects the
+   node uses the stabilized ViTMatte edge; everywhere else, LTX.
+3. **Coverage fallback.** LTX only mattes what it reads as a main subject. A per-area coverage map (1/8 res,
+   temporally smoothed) finds the parts of the selection LTX left empty (a parked car, a table) and fills them with
+   the ViTMatte matte, while the parts LTX did matte keep LTX edges.
+4. **Temporal stability by construction.** LTX renders 49 frames jointly. SAM3 and ViTMatte decide per frame, so
+   their outputs are smoothed with optical-flow-warped neighbours before blending. Long shots are rendered in
+   overlapping chunks and cross-faded; the joins measure steadier than the rest of the shot.
+5. **One node, a real graph.** On Queue, the node expands into a full ComfyUI graph of SAM3, ViTMatte and LTX stages.
+   Each stage is cached, so switching Fast/Best or running the full shot after a preview reuses finished work.
+
+<details>
+<summary><b>Engineering notes</b></summary>
+
+- **Speed:** LTX runs with Comfy Kitchen int8 attention: 36% faster sampling (5.09 to 3.25 s/step), edge change
+  0.004, which is 7x smaller than changing the seed. Also benchmarked: Sage attention (same speed, but needs a
+  per-machine wheel), Flash attention (no gain), block-sparse attention (changed the matte like a new seed) and
+  torch.compile (crashes on int8 weights).
+- **No text encoder:** alpha-gen uses an empty prompt, so its conditioning ships with the pack (24 KB, captured inside
+  ComfyUI so it is bit-identical). That removes a 13 GB download and its RAM.
+- **Memory:** uint8 plates, float16 masks, alpha-only VAE decode and per-frame blending took peak RAM from 48.5 to
+  39.9 GB. Disk streaming then halves it again (below).
+- **Bit-exact verification:** every memory change was diffed against the previous output. One change rounded the
+  isolated plate's colours by a single 8-bit level, and LTX turned that into a visibly different sample (0.012 edge
+  difference). Inputs to the generative pass now stay at full precision; result: identical mattes.
+
+</details>
+
+---
 
 ## Using it
 
-1. Open `example_workflow.json` (video) or `example_sequence_workflow.json` (image sequence). Or wire it yourself:
+<p align="center"><img src="docs/images/node_ui.jpg" width="900" alt="the Selective Matte node with its picker"></p>
+
+1. Open `example_workflow.json` (video) or `example_sequence_workflow.json` (image sequence), or wire it yourself:
 
    | Plate | Wiring |
    |---|---|
    | **Video** | Load Video → Get Video Components → `images` + `fps` |
    | **Image sequence** | **Load Plate Sequence** → `images` + `fps` + `first_frame` |
 
-   **Load Plate Sequence** reads a folder (`D:/plates/sh010`) or a pattern (`D:/plates/sh010/plate.####.exr` or `plate.%04d.exr`).
-   - Formats: PNG, JPG, TIF, EXR. EXR is treated as scene-linear and converted to sRGB.
-   - `first` and `last` set the frame range.
-   - Output frames keep the plate's numbers: `plate.1001` gives `alpha_01001`.
+   **Load Plate Sequence** reads a folder (`D:/plates/sh010`) or a pattern (`plate.####.exr` or `plate.%04d.exr`).
+   PNG, JPG, TIF and EXR (scene-linear, converted to sRGB). `first` / `last` set the range, and output frames keep
+   the plate's numbers: `plate.1001` gives `alpha_01001`.
 
-   Any nodes can sit in between (crop, resize, colour). The node mattes whatever arrives at `images`.
-   **Best quality at 1920x1088** (a 1920x1080 plate is padded automatically): LTX alpha-gen is tuned for that size.
-   Other sizes work but edges can be softer. For 4K plates, matte a 1080p proxy and scale the alpha up.
-   The picker shows the plate size as a chip (amber when it is not 1920x1080/1088).
-2. Click **Load plate** in the node. It runs the nodes feeding `images` and fills the scrubber.
-   Click it again whenever you change the crop or the clip. If the plate changes after you picked someone, the node warns you to re-detect.
-3. Scrub to a frame where the subject is fully visible. Type what to find in the box next to **Detect** and press **Detect** (or Enter):
+   Any nodes can sit in between (crop, resize, colour). **Best quality at 1920x1088** (1920x1080 is padded
+   automatically): LTX alpha-gen is tuned for that size. For 4K plates, matte a 1080p proxy and scale the alpha up.
+2. Click **Load plate**. It runs the nodes feeding `images` and fills the scrubber.
+3. Scrub to a frame where the subject is fully visible, type what to find and press **Detect**:
 
    | Type | Finds |
    |---|---|
    | `person` (default) | every person |
    | `dog`, `red car`, `bike`, `woman` | any SAM3 concept |
-   | `dog, person` | both. Use this to also paint out the people near a dog |
+   | `dog, person` | both: also paints out the people near a dog |
 
-   Each detection is outlined and labelled (`2 dog`).
-4. **Click the subject** to matte. It turns orange. Other detections are excluded automatically.
-
-   **No typing needed:** click anything that is not a detection (a table, a lamp, a prop), with or without Detect.
-   SAM3 segments what you clicked and it becomes the subject. Then **Shift-click** more objects to add them:
-   the man, then his glass, then the table gives one matte of all three.
-5. Fix parts if needed, on any frame where the part is visible:
+4. **Click the subject.** It turns orange; every other detection is excluded.
+   **No typing needed:** click anything that is not a detection (a table, a prop) and SAM3 segments it.
+   Shift-click more objects to add them: the man, his glass and the table give one matte.
+5. Fix parts if needed, on the first frame the part appears (tracking runs forward):
 
    | Action | What it does |
    |---|---|
@@ -46,41 +172,54 @@ subject from a word you type, then lets LTX draw the edges.
    | **Shift-click** | **Add** a part: the subject's own hand that SAM3 missed |
    | **Ctrl-click** | Remove a cut or add marker |
 
-   Place a cut or add on the **first frame** that part appears. Tracking only runs forward.
-   Each click gets automatic "not this" points, so a single click gives just the part:
-   - **Add:** the other detections nearby are marked "not this".
-   - **Cut:** the subject is marked "not this".
+6. **Preview chunk** (49 frames), then check the **Result** tab: drag to wipe plate against comp.
+7. **Run full shot.** The alpha is saved to `ComfyUI/output/<filename_prefix>/alpha_00001.png …`,
+   16-bit PNG by default or half-float EXR.
 
-   The part shows as a red or green overlay. If a click still grabs a whole subject, a red warning tells you to Ctrl-click it away and click closer to the part.
-6. Click **Preview chunk** (first 49 frames). Check the **Result** tab: drag to wipe plate against comp, and press `comp / alpha` to switch views.
-7. Click **Run full shot**.
-
-The alpha is saved to `ComfyUI/output/<filename_prefix>/alpha_00001.png …`. Frame numbers match the plate, starting at 1.
-It is 16-bit PNG by default; set `format` to `exr` for half-float EXR.
-
-**Quality**
-
-| Preset | What it does |
+| Quality | What it does |
 |---|---|
-| **Best (v12)** | 2 LTX passes. Pass 2 runs on a plate with the other detections painted out, so LTX draws the subject's edges itself. |
+| **Best (v12)** | 2 LTX passes, the second on the isolated plate. |
 | **Fast (v7)** | 1 LTX pass. About half the time; edges against other subjects are a little weaker. |
 
-**QC badge** (shown after each run)
+**QC badges** (after each run)
 
 | Badge | Meaning | Green when |
 |---|---|---|
-| flicker | Motion-compensated flicker, compared with LTX alone | ≤ 1.3x |
+| flicker | Motion-compensated flicker vs LTX alone | ≤ 1.3x |
 | soft edge kept | Share of LTX's soft edge (hair, fur, dust) that survived | ≥ 95% |
-| LTX cover | How much of the subject LTX matted. Where it is low, the node uses the ViTMatte edge instead | ≥ 90% |
+| LTX cover | How much of the subject LTX matted (the rest uses ViTMatte) | ≥ 90% |
 
-**Models** are always visible on the node: LTX model, alpha-gen IC-LoRA, text encoder, video VAE, audio VAE, ViTMatte. Hover a model selector to see the recommended file and its folder.
-After you copy model files into the folders, press **R** in ComfyUI to refresh the lists. A missing model is reported by name when you queue.
+`⚙ Advanced`: frames per chunk, overlap frames, seed, temporal smoothing, trimap erode/dilate, the zone near other
+subjects, SAM3 threshold and `fast_attention`. Hover any model selector for the recommended file and folder; press
+**R** after adding models.
 
-`⚙ Advanced` holds frames per chunk, overlap frames (chunk joins are cross-faded over these), the seed, temporal smoothing (frames before/after each frame used to steady the SAM3/ViTMatte edges, default 2), the trimap erode/dilate, the zone near other subjects, the SAM3 threshold and `fast_attention`.
+---
 
-**Speed.** `fast_attention` (on by default) runs LTX with Comfy Kitchen int8 attention, built into ComfyUI 0.38+.
-LTX sampling is about 36% faster. The matte changes by about 0.004 on edges, 7x less than changing the seed.
-Flicker and hair stay the same. On older ComfyUI the node falls back to standard attention.
+## Hardware
+
+<p align="center"><img src="docs/images/memory.png" width="760" alt="peak RAM"></p>
+
+**12 GB+ VRAM, 16 GB+ RAM.** ComfyUI 0.38+ streams the 22B LTX weights to the GPU as needed (dynamic VRAM), so small
+GPUs work. The weights then wait in system RAM, about 24 GB, unless ComfyUI also streams them from disk.
+
+**Disk streaming is the low-RAM switch.** It turns on by itself when the model sits on a fast NVMe SSD; on other
+drives add `--fast-disk` to ComfyUI's launch arguments. The log line `Model storage policy: fast_disk=True` confirms it.
+
+| Setup (dogs preview, 49 frames, Best, RTX 5090) | Peak RAM | Time | Matte |
+|---|---|---|---|
+| Model in RAM | 40 GB | | reference |
+| Disk streaming | 21 GB | 272 s | identical |
+| Disk streaming, machine squeezed to **16 GB** | fits | 333 s | identical |
+| 12 GB of VRAM free (simulated) | | about 5% slower | identical |
+
+<sub>Times from a fresh start, model loading included. The 16 GB test locked the rest of a 128 GB machine's RAM so the
+OS could not use it. A real 12 GB card is slower from compute, not memory. Long shots need more working memory and
+were not squeeze-tested.</sub>
+
+**GGUF (optional).** With [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF) installed, `.gguf` files appear in the
+model list, e.g. `LTX-2.5-Distilled-Q4_K_M.gguf` (15 GB, [realrebelai/LTX-2.5_GGUFs](https://huggingface.co/realrebelai/LTX-2.5_GGUFs)).
+Use it only to save disk space: GGUF can't be streamed from disk, so it needs *more* RAM (27 vs 21 GB) and runs about
+30% slower. Edge difference 0.05; it looks the same.
 
 ## Install
 
@@ -99,70 +238,33 @@ git clone https://github.com/rik-python/ComfyUI-SelectiveMatte.git
 |---|---|
 | `ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors` | `models/diffusion_models` |
 | `ltx-2.5-22b-ic-lora-alpha-gen-0.9.safetensors` ([Lightricks/LTX-2.5-22b-IC-LoRA-Alpha-Gen](https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Alpha-Gen)) | `models/loras` |
-| `gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors` (**optional**: the pack ships the empty-prompt conditioning, so `text encoder` defaults to built-in) | `models/text_encoders` |
 | `ltx-2.5-video-vae-conv-bf16.safetensors` (**conv** VAE; the diffusion VAE can't encode guides) | `models/vae` |
 | `ltx-2.5-audio-vae-bf16.safetensors` | `models/vae` |
-| ViTMatte `hustvl/vitmatte-base-composition-1k` (auto-downloads on the first run) | `models/vitmatte/` |
-
-**4. Hardware.** Any Nvidia GPU with **12 GB+ VRAM**, and **16 GB+ of system RAM** with the models on an NVMe SSD.
-It renders 1920x1088 x 49 frames per LTX chunk; longer shots are split into overlapping chunks and cross-faded.
-See [Low VRAM / low RAM](#low-vram--low-ram).
-
-## Low VRAM / low RAM
-
-ComfyUI 0.38+ streams model weights to the GPU as it needs them (dynamic VRAM), so the 22B LTX model runs on small
-GPUs. The catch: the weights then wait in **system RAM** (about 24 GB) unless ComfyUI can also stream them from disk.
-
-**Disk streaming is the low-RAM switch.** ComfyUI turns it on by itself when the model file sits on a fast NVMe SSD.
-On other drives, add `--fast-disk` to ComfyUI's launch arguments. To check: the ComfyUI log prints
-`Model storage policy: fast_disk=True` with the LTX model's path when it is on.
-
-Measured on the dogs preview (49 frames, Best, int8 model, RTX 5090; times are from a fresh start, model loading included):
-
-| Setup | Peak RAM | Time | Matte |
-|---|---|---|---|
-| Model in RAM (no disk streaming) | 40 GB | | reference |
-| Disk streaming | 21 GB | 272 s | identical |
-| Disk streaming, machine squeezed to **16 GB RAM** | fits | 333 s | identical |
-| 12 GB of VRAM free (simulated) | | about 5% slower | identical |
-
-A real 12 GB card is slower than these numbers because it has less compute, not because it runs out of memory.
-
-**Longer shots** need more working memory (the plate and mattes in RAM). Only the 49-frame preview was tested at
-16 GB; on a 16 GB machine, split long shots if a full run runs out of memory.
-
-**GGUF models (optional).** With the [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF) pack installed, `.gguf`
-files show up in the `LTX-2.5 model` list, for example `LTX-2.5-Distilled-Q4_K_M.gguf` (15 GB,
-[realrebelai/LTX-2.5_GGUFs](https://huggingface.co/realrebelai/LTX-2.5_GGUFs)). Use it only to save disk space:
-GGUF can't be streamed from disk, so it needs **more** RAM than int8 with disk streaming (27 GB vs 21 GB), runs about
-30% slower, and its edges differ slightly (edge difference 0.05; they look the same).
-
-## How it works
-
-On **Queue**, the node expands into a normal ComfyUI graph:
-
-1. **SAM3 tracks** for the target, each excluded person, and each cut and add.
-2. Build the selection, then refine it with ViTMatte.
-3. **Stabilize** the selection and ViTMatte edges over time with optical flow.
-4. **LTX pass 1** on the plate, chunked and cross-faded.
-5. **Isolated plate**: the other detections inpainted out.
-6. **LTX pass 2** on the isolated plate.
-7. **v12 blend**: LTX edges everywhere, with ViTMatte within about 15 px of other subjects (where LTX has no edge information).
-   Parts of the selection LTX did not matte (low LTX cover, e.g. the table under a person's hands) use the
-   ViTMatte matte; the parts LTX did matte keep LTX edges.
-8. Save the alpha and write the QC scores.
-
-Each stage is its own cached node. Changing the quality preset, or running the full shot after a preview, reuses the stages that already finished.
+| ViTMatte `hustvl/vitmatte-base-composition-1k` (auto-downloads on first run) | `models/vitmatte/` |
+| `gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors` (*optional*: the built-in empty prompt replaces it) | `models/text_encoders` |
 
 ## Limits
 
-- Tracks start at the frame you detected on. Frames before it come out empty.
-- Where two subjects overlap, the edge position between them comes from SAM3/ViTMatte, not LTX.
-- LTX alpha-gen mattes what it reads as the **main** subject. It mattes cars, dust and people well, but a background
-  object (a parked car behind the action) can come out empty. Then the LTX cover badge goes red and the node uses
-  the ViTMatte edge (ONYX-style quality, no LTX hair detail). Flicker and soft edge then show n/a (they compare against LTX).
-- Up to 8 other detections (nearest first) are excluded. Each costs a SAM3 track, about 14 s on a preview.
-- If something fully covers the subject (a car driving in front of it), SAM3 can lose the track for the rest of
-  the shot. Pick on a frame after the occlusion, or split the shot.
+- Tracks start at the frame you detected on; frames before it come out empty.
+- Where two subjects overlap, the edge *position* between them comes from SAM3/ViTMatte, not LTX. Where a hand or
+  arm crosses in front of the subject, expect a soft transition there.
+- LTX mattes what it reads as the **main** subject. A background object (a parked car behind the action) can come
+  out empty; the LTX cover badge goes red and that area uses the ViTMatte edge.
+- If something fully covers the subject (a car driving in front of it), SAM3 can lose the track. Pick on a frame
+  after the occlusion, or split the shot.
+- Up to 8 other detections (nearest first) are excluded; each costs a SAM3 track, about 14 s per preview.
 - Light fringes on hair are colour spill from the plate. Despill in comp.
-- Shots are limited to 24 chunks (about 960 frames with the default 9 overlap frames). Split longer shots.
+- Shots are limited to 24 chunks (about 960 frames). Split longer shots.
+
+## Credits
+
+Built on [LTX-2.5 and the IC-LoRA Alpha-Gen](https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Alpha-Gen) by
+Lightricks, [SAM3](https://github.com/facebookresearch/sam3) by Meta,
+[ViTMatte](https://huggingface.co/hustvl/vitmatte-base-composition-1k) by HUST Vision Lab,
+[ComfyUI-SAM3](https://github.com/PozzettiAndrea/ComfyUI-SAM3) and [ComfyUI](https://github.com/comfyanonymous/ComfyUI).
+ONYX Ai Matte is a product of its respective owner; it is referenced here only as a design comparison.
+
+**Author: Rikin Patel**, VFX compositor (Nuke) and ComfyUI educator, *Comfy Compositing*.
+Designed for real compositing work: one subject, plate-accurate frame numbers, 16-bit/EXR output, measurable QC.
+
+MIT License.
