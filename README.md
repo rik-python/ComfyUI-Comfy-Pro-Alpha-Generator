@@ -1,19 +1,17 @@
 <div align="center">
 
-# Comfy Pro Alpha Generator
-
-**Generative-quality mattes for one chosen subject. One ComfyUI node.**
+<img src="docs/images/banner.png" alt="Comfy Pro Alpha Generator by Comfy Compositing" width="100%">
 
 by **Rikin Patel** · [Comfy Compositing](https://comfycompositing.com)
 
 SAM3 decides *what* to matte. LTX-2.5 alpha-gen decides *how the edge looks*.
 
-![ComfyUI](https://img.shields.io/badge/ComfyUI-0.38%2B-0d1117?style=flat-square&labelColor=2dd4bf&color=0d1117)
-![LTX-2.5](https://img.shields.io/badge/LTX--2.5-IC--LoRA%20alpha--gen-0d1117?style=flat-square&labelColor=2dd4bf)
-![SAM3](https://img.shields.io/badge/SAM3-tracking-0d1117?style=flat-square&labelColor=2dd4bf)
-![VRAM](https://img.shields.io/badge/VRAM-12%20GB%2B-0d1117?style=flat-square&labelColor=fb923c)
-![RAM](https://img.shields.io/badge/RAM-16%20GB%2B-0d1117?style=flat-square&labelColor=fb923c)
-![License](https://img.shields.io/badge/license-free%20non--commercial-0d1117?style=flat-square&labelColor=8b949e)
+![ComfyUI](https://img.shields.io/badge/ComfyUI-0.38%2B-12122a?style=flat-square&labelColor=9a75ea)
+![LTX-2.5](https://img.shields.io/badge/LTX--2.5-IC--LoRA%20alpha--gen-12122a?style=flat-square&labelColor=9a75ea)
+![SAM3](https://img.shields.io/badge/SAM3-tracking-12122a?style=flat-square&labelColor=63b3ed)
+![VRAM](https://img.shields.io/badge/VRAM-12%20GB%2B-12122a?style=flat-square&labelColor=63b3ed)
+![RAM](https://img.shields.io/badge/RAM-16%20GB%2B-12122a?style=flat-square&labelColor=63b3ed)
+![License](https://img.shields.io/badge/license-free%20non--commercial-12122a?style=flat-square&labelColor=f6a94a)
 
 </div>
 
@@ -22,6 +20,8 @@ SAM3 decides *what* to matte. LTX-2.5 alpha-gen decides *how the edge looks*.
 <sub>Task: matte the middle kid only. **LTX alpha-gen alone** has perfect hair but mattes all three kids, and there is no way to tell it which one. **SAM3** and **ONYX-style** pick the right kid but lose the strands. **Comfy Pro Alpha Generator** does both. Top: matte over checker. Below: hair zoom as alpha, then comped over green.</sub>
 
 ---
+
+<sub><code>// 01 · problem</code></sub>
 
 ## The problem
 
@@ -33,6 +33,8 @@ and each one is missing half of the answer:
 | **LTX-2.5 alpha-gen** (generative) | no | hair-level | Renders the matte jointly over the whole clip, but mattes *every* main subject and can't be told which one. |
 | **SAM3 / ONYX-style** (discriminative) | yes | soft, per-frame | Tracks any object you point at, then *measures* the edge frame by frame with ViTMatte. Strands get lost; edges chatter. |
 | **Comfy Pro Alpha Generator** | **yes** | **hair-level** | SAM3 steers, LTX draws. Built from both. |
+
+<sub><code>// 02 · results</code></sub>
 
 ## Results
 
@@ -82,6 +84,8 @@ including the same class: the white dog out of four, the bike without its rider.
 
 ---
 
+<sub><code>// 03 · method</code></sub>
+
 ## How it works
 
 ```mermaid
@@ -96,8 +100,11 @@ flowchart LR
     L2 --> B
     R --> B
     B --> A([16-bit alpha + QC])
-    style B fill:#0d1117,stroke:#2dd4bf,color:#e6edf3
-    style A fill:#2dd4bf,stroke:#2dd4bf,color:#0d1117
+    style B fill:#12122a,stroke:#9a75ea,color:#ececf6
+    style L1 stroke:#63b3ed
+    style L2 stroke:#63b3ed
+    style S stroke:#f6a94a
+    style A fill:#9a75ea,stroke:#9a75ea,color:#12122a
 ```
 
 **The key ideas**
@@ -136,6 +143,8 @@ flowchart LR
 </details>
 
 ---
+
+<sub><code>// 04 · usage</code></sub>
 
 ## Using it
 
@@ -197,6 +206,8 @@ subjects, SAM3 threshold and `fast_attention`. Hover any model selector for the 
 
 ---
 
+<sub><code>// 05 · hardware</code></sub>
+
 ## Hardware
 
 **Which setup do I need?** Same example workflow for everyone; only these change:
@@ -232,11 +243,13 @@ model list, e.g. `LTX-2.5-Distilled-Q4_K_M.gguf` (15 GB, [realrebelai/LTX-2.5_GG
 Use it only to save disk space: GGUF can't be streamed from disk, so it needs *more* RAM (27 vs 21 GB) and runs about
 30% slower. Edge difference 0.05; it looks the same.
 
+<sub><code>// 06 · install</code></sub>
+
 ## Install
 
 **1. Clone into `ComfyUI/custom_nodes`:**
 ```
-git clone https://github.com/rik-python/Comfy-Pro-Alpha-Generator.git
+git clone https://github.com/rik-python/ComfyUI-Comfy-Pro-Alpha-Generator.git
 ```
 
 **2. Required node packs** (ComfyUI Manager can install both):
@@ -281,7 +294,7 @@ git clone https://github.com/rik-python/Comfy-Pro-Alpha-Generator.git
 ```
 ComfyUI/
 ├── custom_nodes/
-│   ├── Comfy-Pro-Alpha-Generator/        <- this repo
+│   ├── ComfyUI-Comfy-Pro-Alpha-Generator/   <- this repo
 │   ├── ComfyUI-SAM3/
 │   └── ComfyUI-LTXVideo/
 └── models/
@@ -314,6 +327,8 @@ hf download Lightricks/LTX-2.5-22b-IC-LoRA-Alpha-Gen ltx-2.5-22b-ic-lora-alpha-g
 Models already in a subfolder (`models/diffusion_models/LTX/...`) work too: the node finds them by file name.
 Press **R** in ComfyUI after adding files. **Low-RAM tip:** keep `models/` on an NVMe SSD (see [Hardware](#hardware)).
 
+<sub><code>// 07 · limits</code></sub>
+
 ## Limits
 
 - Tracks start at the frame you detected on; frames before it come out empty.
@@ -327,6 +342,8 @@ Press **R** in ComfyUI after adding files. **Low-RAM tip:** keep `models/` on an
 - Light fringes on hair are colour spill from the plate. Despill in comp.
 - Shots are limited to 24 chunks (about 960 frames). Split longer shots.
 
+<sub><code>// 08 · credits</code></sub>
+
 ## Credits
 
 Built on [LTX-2.5 and the IC-LoRA Alpha-Gen](https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Alpha-Gen) by
@@ -337,6 +354,8 @@ ONYX Ai Matte is a product of its respective owner; it is referenced here only a
 
 **Author: Rikin Patel**, VFX compositor (Nuke) and ComfyUI educator at [Comfy Compositing](https://comfycompositing.com).
 Designed for real compositing work: one subject, plate-accurate frame numbers, 16-bit/EXR output, measurable QC.
+
+<sub><code>// 09 · license</code></sub>
 
 ## License
 

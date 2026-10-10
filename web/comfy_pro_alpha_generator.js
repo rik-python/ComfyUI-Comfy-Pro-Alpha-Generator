@@ -17,33 +17,49 @@ const VERSION = "0.2.0";
 const ADVANCED = ["chunk", "overlap", "fast_attention",
     "seed", "control_after_generate", "erode", "dilate", "near_px", "stabilize_radius", "sam3_threshold"];
 const HIDDEN = ["picks", "render"];
-const COLORS = ["#4aa3ff", "#b07cff", "#3fd0c9", "#e6d94a", "#ff6fb5", "#8bd450", "#ff9d5c", "#9aa4b2"];
-const TARGET = "#ff8a1f", CUT = "#ff4d4d", ADD = "#3ddc84";
+// Comfy Compositing brand (comfycompositing.com), adapted to ComfyUI's dark canvas.
+const BRAND = {
+    navy: "#12122a", navy2: "#1a1a36", navy3: "#24244a", line: "#34345e", text: "#ececf6", muted: "#9696b8",
+    blue: "#63b3ed", purple: "#9a75ea", amber: "#f6a94a", good: "#5dd39e", bad: "#f26d7d",
+};
+const COLORS = [BRAND.blue, BRAND.purple, "#5fd4c8", "#e6d94a", "#ff7eb6", "#8bd450", "#c3a6ff", "#9aa4b2"];
+const TARGET = BRAND.amber, CUT = BRAND.bad, ADD = BRAND.good;
 const MAX_OTHERS = 8;  // excluded detections (one SAM3 track each)
 
+const SANS = `"Hanken Grotesk", "Segoe UI", system-ui, sans-serif`;
+const MONO = `"JetBrains Mono", "Cascadia Mono", Consolas, monospace`;
 const css = `
-.sm-root{display:flex;flex-direction:column;gap:6px;font:12px/1.3 system-ui,sans-serif;color:#ddd;width:100%;height:100%;box-sizing:border-box}
+.sm-root{display:flex;flex-direction:column;gap:7px;font:12px/1.35 ${SANS};color:${BRAND.text};width:100%;height:100%;box-sizing:border-box}
 .sm-bar{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
-.sm-btn{background:#2b2f36;border:1px solid #444b55;color:#eee;border-radius:6px;padding:4px 10px;cursor:pointer;font:inherit}
-.sm-btn:hover{background:#363b44}.sm-btn.primary{background:#ff8a1f;border-color:#ff8a1f;color:#111;font-weight:600}
-.sm-btn.ghost{background:transparent}
-.sm-input{background:#1b1e23;border:1px solid #444b55;color:#eee;border-radius:6px;padding:4px 8px;font:inherit;width:150px}.sm-btn:disabled{opacity:.45;cursor:default}
-.sm-view{position:relative;flex:1 1 auto;min-height:120px;background:#111;border-radius:8px;overflow:hidden}
+.sm-btn{--c:${BRAND.muted};background:transparent;border:1px solid var(--c);color:var(--c);border-radius:999px;padding:3px 11px;cursor:pointer;font:11px/1.4 ${MONO};letter-spacing:.01em;transition:background .12s}
+.sm-btn:hover{background:color-mix(in srgb,var(--c) 16%,transparent)}
+.sm-btn.blue{--c:${BRAND.blue}}.sm-btn.purple{--c:${BRAND.purple}}.sm-btn.amber{--c:${BRAND.amber}}
+.sm-btn.fill{background:var(--c);color:${BRAND.navy};font-weight:600}.sm-btn.fill:hover{filter:brightness(1.08);background:var(--c)}
+.sm-btn.ghost{--c:${BRAND.muted};border-color:transparent}
+.sm-btn:disabled{opacity:.4;cursor:default}
+.sm-input{background:${BRAND.navy};border:1px solid ${BRAND.line};color:${BRAND.text};border-radius:999px;padding:3px 11px;font:11px/1.4 ${MONO};width:150px;outline:none}
+.sm-input:focus{border-color:${BRAND.purple}}
+.sm-view{position:relative;flex:1 1 auto;min-height:120px;background:#0b0b1d;border:1px solid ${BRAND.line};border-radius:10px;overflow:hidden}
 .sm-view canvas{position:absolute;inset:0;width:100%;height:100%}
-.sm-hint{position:absolute;left:8px;bottom:8px;right:8px;background:#000a;border-radius:6px;padding:4px 8px;pointer-events:none}
-.sm-chip{display:inline-flex;gap:4px;align-items:center;background:#22262c;border-radius:10px;padding:2px 8px}
-.sm-dot{width:8px;height:8px;border-radius:50%}
-.sm-scrub{display:flex;gap:8px;align-items:center}.sm-scrub input{flex:1}
-.sm-tabs{display:flex;gap:4px}.sm-tab{padding:3px 10px;border-radius:6px;cursor:pointer;background:#22262c}
-.sm-tab.on{background:#ff8a1f;color:#111;font-weight:600}
-.sm-qc{display:flex;gap:6px;flex-wrap:wrap}.sm-badge{border-radius:10px;padding:2px 8px;font-weight:600;color:#111}
-.sm-g{background:#3ddc84}.sm-a{background:#ffc94d}.sm-r{background:#ff6b6b}
-.sm-about{flex:0 0 auto;border-top:1px solid #333a43;padding-top:4px;color:#aab2bd}
-.sm-about summary{cursor:pointer;list-style:none;user-select:none;color:#c9d1d9}
+.sm-hint{position:absolute;left:8px;bottom:8px;right:8px;background:#0b0b1dcc;border-radius:8px;padding:5px 9px;pointer-events:none}
+.sm-chip{display:inline-flex;gap:5px;align-items:center;background:${BRAND.navy};border:1px solid ${BRAND.line};border-radius:999px;padding:1px 9px;font:10.5px/1.6 ${MONO};color:${BRAND.muted}}
+.sm-dot{width:7px;height:7px;border-radius:50%}
+.sm-scrub{display:flex;gap:8px;align-items:center;font:10.5px ${MONO};color:${BRAND.muted}}.sm-scrub input{flex:1;accent-color:${BRAND.purple}}
+.sm-tabs{display:flex;gap:2px;background:${BRAND.navy};border:1px solid ${BRAND.line};border-radius:999px;padding:2px}
+.sm-tab{padding:2px 11px;border-radius:999px;cursor:pointer;font:11px/1.4 ${MONO};color:${BRAND.muted}}
+.sm-tab.on{background:${BRAND.purple};color:${BRAND.navy};font-weight:600}
+.sm-qc{display:flex;gap:6px;flex-wrap:wrap}
+.sm-badge{--c:${BRAND.muted};border:1px solid var(--c);color:var(--c);background:color-mix(in srgb,var(--c) 12%,transparent);border-radius:999px;padding:1px 9px;font:600 10.5px/1.6 ${MONO}}
+.sm-g{--c:${BRAND.good}}.sm-a{--c:${BRAND.amber}}.sm-r{--c:${BRAND.bad}}
+.sm-about{flex:0 0 auto;border-top:1px solid ${BRAND.line};padding-top:6px;color:${BRAND.muted}}
+.sm-about summary{cursor:pointer;list-style:none;user-select:none;display:flex;align-items:center;gap:8px;font:10.5px/1.6 ${MONO};letter-spacing:.06em;text-transform:uppercase}
 .sm-about summary::-webkit-details-marker{display:none}
-.sm-about summary::before{content:"\\25B8  "}.sm-about[open] summary::before{content:"\\25BE  "}
-.sm-about-body{display:grid;gap:4px;padding:6px 2px 2px 14px}
-.sm-about b{color:#eee}.sm-about a{color:#2dd4bf;text-decoration:none}.sm-about a:hover{text-decoration:underline}
+.sm-about summary::after{content:"+";margin-left:auto;color:${BRAND.muted}}.sm-about[open] summary::after{content:"\u2212"}
+.sm-motif{display:inline-flex;align-items:center;gap:0}
+.sm-motif i{width:6px;height:6px;border-radius:50%;display:block}.sm-motif s{width:12px;border-top:1px dashed ${BRAND.muted};display:block;opacity:.7}
+.sm-about-body{display:grid;gap:4px;padding:8px 2px 2px}
+.sm-about b{color:${BRAND.text}}.sm-about a{color:${BRAND.blue};text-decoration:none}.sm-about a:hover{text-decoration:underline}
+.sm-about .sm-name{font:600 15px/1.2 ${SANS};color:${BRAND.text}}.sm-about .sm-name em{font-style:normal;color:${BRAND.purple}}
 `;
 
 function injectCss() {
@@ -203,15 +219,22 @@ function aboutPanel() {
         return d;
     };
     const details = el("details", "sm-about");
-    details.append(el("summary", null, `About ${TITLE}`));
+    const sum = el("summary");
+    const motif = el("span", "sm-motif");
+    [BRAND.blue, BRAND.purple, BRAND.amber].forEach((c, i) => {
+        if (i) motif.append(el("s"));
+        const d = el("i"); d.style.background = c; motif.append(d);
+    });
+    sum.append(motif, el("span", null, "// About · Comfy Compositing"));
+    details.append(sum);
     const body = el("div", "sm-about-body");
     body.append(
-        line(el("b", null, TITLE), ` v${VERSION}`),
+        (() => { const n = el("div", "sm-name"); n.append("Comfy Pro ", el("em", null, "Alpha Generator"), el("span", "sm-chip", `v${VERSION}`)); n.lastChild.style.marginLeft = "8px"; return n; })(),
         line("Mattes one chosen subject with generative edge quality: SAM3 picks it, LTX-2.5 alpha-gen draws the edge."),
         line("Created by ", el("b", null, "Rikin Patel"), " at ", link("https://comfycompositing.com", "Comfy Compositing"), "."),
         line("Free for personal and non-commercial use (PolyForm Noncommercial 1.0.0). Commercial use needs a license: ",
              link("https://comfycompositing.com/contact", "comfycompositing.com/contact"), "."),
-        line(link("https://github.com/rik-python/Comfy-Pro-Alpha-Generator", "Docs and updates on GitHub")),
+        line(link("https://github.com/rik-python/ComfyUI-Comfy-Pro-Alpha-Generator", "Docs and updates on GitHub")),
     );
     details.append(body);
     for (const ev of ["pointerdown", "mousedown"]) details.addEventListener(ev, (e) => e.stopPropagation());  // not a canvas drag
@@ -259,7 +282,7 @@ class Picker {
             t.dataset.k = k;
             this.tabs.appendChild(t);
         }
-        this.loadBtn = el("button", "sm-btn", "Load plate");
+        this.loadBtn = el("button", "sm-btn blue", "Load plate");
         this.loadBtn.title = "Run the nodes feeding 'images' and show the plate here (again after changing crop/resize)";
         this.loadBtn.onclick = () => this.loadPlate();
         this.promptBox = el("input", "sm-input");
@@ -270,17 +293,17 @@ class Picker {
         for (const ev of ["keydown", "keyup", "keypress"]) this.promptBox.addEventListener(ev, (e) => e.stopPropagation());
         this.promptBox.addEventListener("keydown", (e) => { if (e.key === "Enter") this.detect(); });
         this.promptBox.addEventListener("change", () => { this.picks.prompt = this.promptText(); this.writePicks(); });
-        this.detectBtn = el("button", "sm-btn primary", "Detect");
+        this.detectBtn = el("button", "sm-btn purple fill", "Detect");
         this.detectBtn.onclick = () => this.detect();
         const clear = el("button", "sm-btn ghost", "Clear picks");
         clear.onclick = () => {
             this.picks = { cuts: [], adds: [], others: [], detect: this.picks.detect, prompt: this.picks.prompt };
             this.writePicks(); this.render();
         };
-        this.previewBtn = el("button", "sm-btn", "Preview chunk");
+        this.previewBtn = el("button", "sm-btn amber", "Preview chunk");
         this.previewBtn.title = "Render the first 49 frames from the pick frame";
         this.previewBtn.onclick = () => this.queue(true);
-        const run = el("button", "sm-btn", "Run full shot");
+        const run = el("button", "sm-btn amber fill", "Run full shot");
         run.onclick = () => this.queue(false);
         this.advBtn = el("button", "sm-btn ghost", "⚙ Advanced");
         this.advBtn.onclick = () => this.toggleAdvanced();
@@ -401,7 +424,7 @@ class Picker {
         if (this.info) {  // LTX alpha-gen is tuned for 1920x1088; a 1920x1080 plate is padded to it automatically
             const { width: w, height: h } = this.info;
             const best = w === 1920 && (h === 1080 || h === 1088);
-            const c = chip(best ? ADD : "#ffc94d", best ? `plate ${w}×${h}` : `plate ${w}×${h} (best: 1920×1088)`);
+            const c = chip(best ? ADD : BRAND.amber, best ? `plate ${w}×${h}` : `plate ${w}×${h} (best: 1920×1088)`);
             c.title = best ? "Best size for LTX alpha-gen."
                 : "LTX alpha-gen is tuned for 1920x1088 (1080p plates are padded automatically). Other sizes work, "
                   + "but edges can be softer. Resize upstream for best quality; for 4K, matte a 1080p proxy.";
@@ -768,11 +791,11 @@ class Picker {
                 g.strokeRect(bx, by, w * r.w, h * r.h);
                 g.setLineDash([]);
                 const tag = p.label ? `${p.id + 1} ${p.label}` : String(p.id + 1);
-                g.font = "bold 12px system-ui"; g.textAlign = "left"; g.textBaseline = "middle";
+                g.font = `600 12px ${SANS}`; g.textAlign = "left"; g.textBaseline = "middle";
                 const tw = g.measureText(tag).width + 12;
                 g.fillStyle = color;
                 g.beginPath(); g.roundRect(bx + 2, by + 2, tw, 20, 10); g.fill();
-                g.fillStyle = "#111";
+                g.fillStyle = BRAND.navy;
                 g.fillText(tag, bx + 8, by + 12);
             }
         }
@@ -792,18 +815,18 @@ class Picker {
                 if (ov) { g.globalAlpha = 0.5; g.drawImage(ov.canvas, r.x, r.y, r.w, r.h); g.globalAlpha = 1; }
                 const px = r.x + p.x * r.w, py = r.y + p.y * r.h;
                 g.fillStyle = color; g.beginPath(); g.arc(px, py, 9, 0, Math.PI * 2); g.fill();
-                g.fillStyle = "#111"; g.font = "bold 14px system-ui"; g.textAlign = "center"; g.textBaseline = "middle";
+                g.fillStyle = BRAND.navy; g.font = `600 14px ${SANS}`; g.textAlign = "center"; g.textBaseline = "middle";
                 g.fillText(sym, px, py + 1);
             }
         }
         if (this.waiting) {
-            this.hint.style.background = "#5a4a12dd";
+            this.hint.style.background = "#4a3514e6";
             this.hint.textContent = "⏳ Waiting for the running render to finish (ComfyUI runs one job at a time). "
                 + "Cancel it in the queue panel to go now.";
             return;
         }
         const warn = [...this.picks.cuts, ...this.picks.adds].find((p) => p.warning);
-        this.hint.style.background = warn || this.picks.stale ? "#7a1f1fdd" : "";
+        this.hint.style.background = warn || this.picks.stale ? "#5a1a2ae6" : "";
         this.hint.textContent = warn ? `⚠ ${warn.warning}`
             : this.picks.stale ? "⚠ The plate changed (crop/resize/new clip) after picking: Detect again."
             : !this.info ? "Connect the plate to 'images', then click Load plate."
@@ -842,7 +865,7 @@ class Picker {
         const kind = /_preview$/.test(q.out_dir || "") ? "preview" : "full shot";
         const range = `${kind}: frames ${q.first_frame}-${q.first_frame + q.frames - 1}`;
         const inside = this.frame >= first && this.frame < first + q.frames;
-        this.hint.style.background = inside ? "" : "#5a4a12dd";
+        this.hint.style.background = inside ? "" : "#4a3514e6";
         this.hint.textContent = inside
             ? `${range} · ${q.mode} · frame ${q.first_frame + it.frame} · drag to wipe plate | ${key}` +
               (q.out_dir ? ` · saved: ${q.out_dir}` : "")
@@ -861,7 +884,6 @@ class Picker {
         const vsLtx = info.ltx_cover == null || info.ltx_cover >= 60;
         if (!vsLtx) {
             const b = badge("flicker / soft edge", "n/a", "");
-            b.style.background = "#9aa4b2";
             b.title = "Measured against LTX, which did not matte this subject: mostly a ViTMatte result. Judge by eye.";
             kids.push(b);
         } else if (info.flicker_x != null) {
@@ -906,6 +928,18 @@ function tintCache(p, color) {
 app.registerExtension({
     name: "ComfyProAlpha.Picker",
     async beforeRegisterNodeDef(nodeType, nodeData) {
+        // Brand colours for every node of the pack (title bar navy, body a step lighter). A colour the user picks
+        // from the node's right-click menu is saved in the workflow and wins on load.
+        const BRANDED = [NODE, LEGACY, "ComfyProAlpha_LoadPlateSequence", "SelectiveMatte_LoadPlateSequence"];
+        if (BRANDED.includes(nodeData.name)) {
+            const made = nodeType.prototype.onNodeCreated;
+            nodeType.prototype.onNodeCreated = function () {
+                const r = made?.apply(this, arguments);
+                this.color = BRAND.navy;
+                this.bgcolor = BRAND.navy2;
+                return r;
+            };
+        }
         if (nodeData.name !== NODE && nodeData.name !== LEGACY) return;
         const created = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
