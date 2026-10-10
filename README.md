@@ -25,14 +25,14 @@ SAM3 decides *what* to matte. LTX-2.5 alpha-gen decides *how the edge looks*.
 
 ## The problem
 
-Rotoscoping one person out of a crowd is still the most manual job in compositing. The AI tools split into two camps,
-and each one is missing half of the answer:
+Pulling one person out of a busy plate is still one of the most manual jobs in compositing. The AI tools I tried
+fall into two groups, and each gets half of it right:
 
 | | Picks *which* subject | Edge quality | Why |
 |---|:---:|:---:|---|
 | **LTX-2.5 alpha-gen** (generative) | no | hair-level | Renders the matte jointly over the whole clip, but mattes *every* main subject and can't be told which one. |
 | **SAM3 / ONYX-style** (discriminative) | yes | soft, per-frame | Tracks any object you point at, then *measures* the edge frame by frame with ViTMatte. Strands get lost; edges chatter. |
-| **Comfy Pro Alpha Generator** | **yes** | **hair-level** | SAM3 steers, LTX draws. Built from both. |
+| **Comfy Pro Alpha Generator** | **yes** | **hair-level** | SAM3 picks the subject, LTX draws the edge. |
 
 <sub><code>// 02 · results</code></sub>
 
@@ -51,13 +51,15 @@ Every method gets the same SAM3 selection.
 | ONYX-style + temporal stabilizer | yes | 46.1% | 31.8% | **0.5x** |
 | **Comfy Pro Alpha Generator** | **yes** | **88.7%** | **88.7%** | 1.2x |
 
-**How to read it**
-- **Hair:** its edge matches LTX's generative hair at 88.7% while matting one subject only. The ViTMatte route
-  reaches 45%: it keeps a soft halo but not the strands, and a SAM3 mask reaches 29% (see the zoom above).
-- **Stability:** against background, it flickers the same as LTX alone (0.0112 vs 0.0109 mean error per
-  pixel). The extra 0.2x comes from the few pixels where the subject touches someone else.
-- **Honest trade-off:** a temporally stabilized ViTMatte matte is *steadier* than LTX (0.5x), because it is smooth
-  and has no strands left to move. Alpha Generator trades that for real hair detail.
+The edge matches LTX's generative hair at 88.7%, and only the middle kid is matted. The ViTMatte route gets to
+45%: you get a soft halo around the head, but the strands are gone (compare the zoom at the top). A plain SAM3 mask
+gets 29%.
+
+Against the background, the node flickers about as much as LTX alone (0.0112 vs 0.0109 mean error per pixel). The
+extra 0.2x comes from the few pixels where the kid touches someone else.
+
+The one row this node doesn't win: a stabilized ViTMatte matte is steadier than LTX itself (0.5x), because it is
+smooth and has no strands left to move. That's the trade. I'll take a little more movement for real hair.
 
 <details>
 <summary><b>Methodology</b></summary>
@@ -112,38 +114,37 @@ flowchart LR
     style A fill:#9a75ea,stroke:#9a75ea,color:#12122a
 ```
 
-**The key ideas**
+**How it gets there**
 
-1. **The isolated plate.** LTX can't be told which subject to matte, so the node changes what LTX *sees*. SAM3
-   finds every other subject, and they are painted out with an **inpainted background** (a flat colour fill gets
-   read as a half-transparent object). LTX then mattes the subject alone and draws every one of its edges itself,
+1. LTX can't be told which subject to matte, so the node changes what LTX *sees*. SAM3 finds every other subject,
+   and they get painted out of a copy of the plate with an inpainted background. (A flat colour fill doesn't work:
+   LTX reads it as a half-transparent object.) LTX then mattes the subject on its own and draws all of its edges,
    including parts SAM3 missed.
-2. **Each tool where it is strong.** Against background, LTX's edge wins. Where the subject overlaps another person,
-   LTX outputs 1.0 on both sides, so there is *no* edge information there. Within about 15 px of other subjects the
-   node uses the stabilized ViTMatte edge; everywhere else, LTX.
-3. **Coverage fallback.** LTX only mattes what it reads as a main subject. A per-area coverage map (1/8 res,
-   temporally smoothed) finds the parts of the selection LTX left empty (a parked car, a table) and fills them with
-   the ViTMatte matte, while the parts LTX did matte keep LTX edges.
-4. **Temporal stability by construction.** LTX renders 49 frames jointly. SAM3 and ViTMatte decide per frame, so
-   their outputs are smoothed with optical-flow-warped neighbours before blending. Long shots are rendered in
-   overlapping chunks and cross-faded; the joins measure steadier than the rest of the shot.
-5. **One node, a real graph.** On Queue, the node expands into a full ComfyUI graph of SAM3, ViTMatte and LTX stages.
-   Each stage is cached, so switching Fast/Best or running the full shot after a preview reuses finished work.
+2. Where the subject overlaps another person, LTX outputs 1.0 on both sides, so there is no edge to take from it.
+   Within about 15 px of other subjects the node uses the stabilized ViTMatte edge instead. Everywhere else the edge
+   is LTX's.
+3. LTX only mattes what it reads as a main subject. A coverage map (1/8 res, smoothed over time) finds the parts of
+   the selection LTX left empty, like a parked car or a table, and fills only those with ViTMatte.
+4. LTX renders 49 frames at once, so its edges hold still. SAM3 and ViTMatte decide frame by frame, so their output
+   is smoothed with optical-flow-warped neighbours before the blend. Long shots render in overlapping chunks that are
+   cross-faded, and the joins measure steadier than the rest of the shot.
+5. On Queue, the node expands into a full ComfyUI graph of SAM3, ViTMatte and LTX stages. Each stage is cached, so
+   switching Fast/Best, or running the full shot after a preview, reuses whatever already finished.
 
 <details>
 <summary><b>Engineering notes</b></summary>
 
-- **Speed:** LTX runs with Comfy Kitchen int8 attention: 36% faster sampling (5.09 to 3.25 s/step), edge change
-  0.004, which is 7x smaller than changing the seed. Also benchmarked: Sage attention (same speed, but needs a
-  per-machine wheel), Flash attention (no gain), block-sparse attention (changed the matte like a new seed) and
-  torch.compile (crashes on int8 weights).
-- **No text encoder:** alpha-gen uses an empty prompt, so its conditioning ships with the pack (24 KB, captured inside
-  ComfyUI so it is bit-identical). That removes a 13 GB download and its RAM.
-- **Memory:** uint8 plates, float16 masks, alpha-only VAE decode and per-frame blending took peak RAM from 48.5 to
-  39.9 GB. Disk streaming then halves it again (below).
-- **Bit-exact verification:** every memory change was diffed against the previous output. One change rounded the
-  isolated plate's colours by a single 8-bit level, and LTX turned that into a visibly different sample (0.012 edge
-  difference). Inputs to the generative pass now stay at full precision; result: identical mattes.
+- LTX runs with Comfy Kitchen int8 attention. Sampling drops from 5.09 to 3.25 s/step (36% faster) and the edge
+  moves by 0.004, seven times less than changing the seed does. I also tried Sage attention (same speed, but it needs
+  a wheel built for each machine), Flash attention (no gain), block-sparse attention (changed the matte as much as a
+  new seed) and torch.compile (crashes on the int8 weights).
+- Alpha-gen uses an empty prompt, so the pack ships that conditioning (24 KB, captured inside ComfyUI so it is
+  bit-identical). Nobody has to download the 13 GB text encoder or hold it in RAM.
+- uint8 plates, float16 masks, an alpha-only VAE decode and per-frame blending took peak RAM from 48.5 to 39.9 GB.
+  Disk streaming halves it again (see Hardware).
+- I diffed every memory change against the previous output. One of them rounded the isolated plate's colours by a
+  single 8-bit level, and LTX turned that into a visibly different sample (0.012 edge difference). Anything that
+  feeds the generative pass now stays at full precision, and the mattes are identical again.
 
 </details>
 
@@ -154,6 +155,8 @@ flowchart LR
 ## Using it
 
 <p align="center"><img src="docs/images/node_ui.jpg" width="620" alt="the Comfy Pro Alpha Generator node with its picker"></p>
+
+The node walks you through three steps (**Plate → Subject → Render**) and only shows the next action.
 
 1. Open `example_workflow.json` (video) or `example_sequence_workflow.json` (image sequence), or wire it yourself:
 
@@ -168,7 +171,6 @@ flowchart LR
 
    Any nodes can sit in between (crop, resize, colour). **Best quality at 1920x1088** (1920x1080 is padded
    automatically): LTX alpha-gen is tuned for that size. For 4K plates, matte a 1080p proxy and scale the alpha up.
-The node walks you through three steps (**Plate → Subject → Render**); it only shows the next action.
 
 2. **Plate.** Click the big **Load plate** button. It runs the nodes feeding `images` and fills the scrubber.
 3. **Subject.** Scrub to a frame where the subject is fully visible and **click it**. It turns orange; every other
@@ -387,7 +389,8 @@ Lightricks, [SAM3](https://github.com/facebookresearch/sam3) by Meta,
 ONYX Ai Matte is a product of its respective owner; it is referenced here only as a design comparison.
 
 **Author: Rikin Patel**, VFX compositor (Nuke) and ComfyUI educator at [Comfy Compositing](https://comfycompositing.com).
-Designed for real compositing work: one subject, plate-accurate frame numbers, 16-bit/EXR output, measurable QC.
+I built this for the shots I actually get: one person out of a busy plate, VFX frame numbers kept, 16-bit or EXR
+out, and a QC number I can check before anything goes to comp.
 
 <sub><code>// 09 · license</code></sub>
 
