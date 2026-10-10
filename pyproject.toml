@@ -1,15 +1,15 @@
 [project]
-name = "comfyui-selectivematte"
-description = "One-node selective matte: SAM3 picks the person, LTX-2.5 alpha-gen draws the edges (hair-level), ONYX-style picker UI."
-version = "0.1.0"
-license = { text = "MIT" }
+name = "comfy-pro-alpha-generator"
+description = "Comfy Pro Alpha Generator: one node. SAM3 picks the subject, LTX-2.5 alpha-gen draws hair-level edges."
+version = "0.2.0"
+license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = ["opencv-python-headless", "transformers", "huggingface_hub", "av"]
 
 [project.urls]
-Repository = "https://github.com/rik-python/ComfyUI-SelectiveMatte"
+Repository = "https://github.com/rik-python/Comfy-Pro-Alpha-Generator"
 
 [tool.comfy]
 PublisherId = "rikinpatel"
-DisplayName = "ComfyUI-SelectiveMatte"
+DisplayName = "Comfy Pro Alpha Generator"
 Icon = ""

@@ -1,9 +1,10 @@
-"""Selective Matte: one node, ONYX-style. Pick a subject (person, animal, vehicle, prop) in the plate, get an
+"""Comfy Pro Alpha Generator: one node, ONYX-style. Pick a subject (person, animal, vehicle, prop) in the plate, get an
 LTX-quality alpha for only that subject.
 
 At run time the node expands into SAM3 tracks -> selection / ViTMatte / stabilize -> LTX alpha-gen (chunked)
 -> [isolated plate -> LTX again] -> v12 blend -> save. Each stage is cached separately.
 """
+import dataclasses
 import json
 import math
 import os
@@ -91,14 +92,14 @@ def _vitmatte_options():
     return found + ["auto-download"]
 
 
-class SelectiveMatte(io.ComfyNode):
+class ComfyProAlphaGenerator(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id="SelectiveMatte",
-            display_name="Selective Matte",
-            category="SelectiveMatte",
-            description="Matte ONE chosen subject with LTX-2.5 alpha-gen edge quality. Type what to find (person, dog, "
+            node_id="ComfyProAlphaGenerator",
+            display_name="Comfy Pro Alpha Generator",
+            category="Comfy Compositing",
+            description="Comfy Pro Alpha Generator by Rikin Patel (Comfy Compositing). Matte ONE chosen subject with LTX-2.5 alpha-gen edge quality. Type what to find (person, dog, "
                         "car...), click Detect, click the subject; alt-click cuts parts, shift-click adds parts.",
             enable_expand=True,
             is_output_node=True,
@@ -117,7 +118,7 @@ class SelectiveMatte(io.ComfyNode):
                 io.Combo.Input("render", options=RENDER, default=RENDER[0],
                                tooltip="preview chunk = first 49 frames from the pick frame"),
                 io.String.Input("picks", default="{}", multiline=False, tooltip="Set by the picker; JSON."),
-                io.String.Input("filename_prefix", default="selective_matte/shot"),
+                io.String.Input("filename_prefix", default="comfy_pro_alpha/shot"),
                 io.Combo.Input("format", options=["png16", "exr"], default="png16"),
                 # models (always visible)
                 _model_input("ltx_model", "LTX-2.5 model"),
@@ -181,7 +182,7 @@ class SelectiveMatte(io.ComfyNode):
         # Sub-nodes link straight to whatever feeds our `images` input (no copy of the batch).
         src = cls.hidden.dynprompt.get_node(cls.hidden.unique_id)["inputs"]["images"]
         if p.get("plate") and p["plate"] != plate_fingerprint(images):
-            print("[SelectiveMatte] warning: the plate changed since the subject was picked; picks may be off")
+            print("[ComfyProAlpha] warning: the plate changed since the subject was picked; picks may be off")
         start = int(p["target"]["frame"])
         count = n_video - start
         L = min(chunk, E.ltx_frames(count) if count >= chunk else 8 * math.ceil((count - 1) / 8) + 1)
@@ -194,7 +195,7 @@ class SelectiveMatte(io.ComfyNode):
         prefix = filename_prefix + ("_preview" if render == RENDER[1] else "")
 
         g = GraphBuilder()
-        vid = g.node("SelectiveMatte_LoadVideo", images=src, fps=fps)
+        vid = g.node("ComfyProAlpha_LoadVideo", images=src, fps=fps)
         sam = g.node("LoadSAM3Model", precision="auto")
 
         last = start + count - 1
@@ -205,7 +206,7 @@ class SelectiveMatte(io.ComfyNode):
                          score_threshold=sam3_threshold, **prompt)
             prop = g.node("SAM3Propagate", sam3_model_config=sam.out(0), video_state=seg.out(0),
                           start_frame=int(frame), end_frame=last, direction="forward")
-            return g.node("SelectiveMatte_TrackMasks", masks=prop.out(0), start=start, count=count,
+            return g.node("ComfyProAlpha_TrackMasks", masks=prop.out(0), start=start, count=count,
                           width=W, height=H).out(0)
 
         def box_track(b):
@@ -227,7 +228,7 @@ class SelectiveMatte(io.ComfyNode):
         def union(masks):
             out = None
             for m in masks:
-                out = m if out is None else g.node("SelectiveMatte_MaskMax", a=out, b=m).out(0)
+                out = m if out is None else g.node("ComfyProAlpha_MaskMax", a=out, b=m).out(0)
             return out
 
         # Target from a detection (box) or from a plain click anywhere (SAM3 point prompt, no Detect needed).
@@ -236,8 +237,8 @@ class SelectiveMatte(io.ComfyNode):
         refine_kw = {k: v for k, v in (("adds", union([point_track(a) for a in in_range(p.get("adds", []))])),
                                        ("cuts", union([point_track(c) for c in in_range(p.get("cuts", []))])),
                                        ("others", union([box_track(o) for o in in_range(p.get("others", []))]))) if v is not None}
-        plate = g.node("SelectiveMatte_Plate", images=src, start=start, count=count)
-        ref = g.node("SelectiveMatte_Refine", plate=plate.out(0), target=target, vitmatte=vitmatte,
+        plate = g.node("ComfyProAlpha_Plate", images=src, start=start, count=count)
+        ref = g.node("ComfyProAlpha_Refine", plate=plate.out(0), target=target, vitmatte=vitmatte,
                      erode=erode, dilate=dilate, radius=stabilize_radius, **refine_kw)
         sel, refined, others = ref.out(0), ref.out(1), ref.out(2)
 
@@ -255,9 +256,9 @@ class SelectiveMatte(io.ComfyNode):
             if _kitchen_attention():
                 model = g.node("ModelAttentionBackend", model=model, attention="comfy kitchen attention").out(0)
             else:
-                print("[SelectiveMatte] Comfy Kitchen attention unavailable (update ComfyUI); using PyTorch attention")
+                print("[ComfyProAlpha] Comfy Kitchen attention unavailable (update ComfyUI); using PyTorch attention")
         if text_encoder == BUILTIN:
-            empty = g.node("SelectiveMatte_EmptyPrompt").out(0)
+            empty = g.node("ComfyProAlpha_EmptyPrompt").out(0)
             cond = g.node("LTXVConditioning", positive=empty, negative=empty, frame_rate=fps)
         else:
             clip = g.node("CLIPLoader", clip_name=text_encoder, type="ltxv")
@@ -277,7 +278,7 @@ class SelectiveMatte(io.ComfyNode):
             directly at full precision; the isolated plate already starts at the range)."""
             chunks = {}
             for i, s in enumerate(starts):
-                img = g.node("SelectiveMatte_ChunkPad", images=images, start=offset + s, length=L, end=offset + count)
+                img = g.node("ComfyProAlpha_ChunkPad", images=images, start=offset + s, length=L, end=offset + count)
                 guide = g.node("LTXAddVideoICLoRAGuide", positive=cond.out(0), negative=cond.out(1), vae=vae.out(0),
                                latent=latent.out(0), image=img.out(0), frame_idx=0, strength=1.0,
                                latent_downscale_factor=lora.out(1), crop="disabled", use_tiled_encode=False,
@@ -288,17 +289,25 @@ class SelectiveMatte(io.ComfyNode):
                               sigmas=sigmas.out(0), latent_image=av.out(0))
                 sep = g.node("LTXVSeparateAVLatent", av_latent=samp.out(0))
                 crop = g.node("LTXVCropGuides", positive=guide.out(0), negative=guide.out(1), latent=sep.out(0))
-                dec = g.node("SelectiveMatte_DecodeAlpha", samples=crop.out(2), vae=vae.out(0))
+                dec = g.node("ComfyProAlpha_DecodeAlpha", samples=crop.out(2), vae=vae.out(0))
                 chunks[f"chunk_{i}"] = dec.out(0)
-            return g.node("SelectiveMatte_Stitch", plan=plan, **chunks).out(0)
+            return g.node("ComfyProAlpha_Stitch", plan=plan, **chunks).out(0)
 
         ltx = ltx_pass(src, offset=start)  # full-precision upstream frames, no copy
         final_kw = {}
         if best:
-            iso = g.node("SelectiveMatte_Isolate", plate=src, start=start, selection=sel, others=others,
+            iso = g.node("ComfyProAlpha_Isolate", plate=src, start=start, selection=sel, others=others,
                          grow=6, blur=6.0)
             final_kw["ltx_isolated"] = ltx_pass(iso.out(0))
-        final = g.node("SelectiveMatte_Final", plate=plate.out(0), ltx=ltx, selection=sel, refined=refined,
+        final = g.node("ComfyProAlpha_Final", plate=plate.out(0), ltx=ltx, selection=sel, refined=refined,
                        others=others, near_px=near_px, filename_prefix=prefix, format=format,
                        first_frame=first_frame + start, save=True, qc=True, comp=comp_wired, **final_kw)
         return io.NodeOutput(final.out(0), final.out(1), expand=g.finalize())
+
+
+class LegacySelectiveMatte(ComfyProAlphaGenerator):
+    """The node's id before the rename. Workflows saved with it still open and run; hidden from the node menu."""
+
+    @classmethod
+    def define_schema(cls):
+        return dataclasses.replace(super().define_schema(), node_id="SelectiveMatte", is_deprecated=True)

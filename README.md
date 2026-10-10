@@ -1,8 +1,10 @@
 <div align="center">
 
-# Selective Matte
+# Comfy Pro Alpha Generator
 
 **Generative-quality mattes for one chosen subject. One ComfyUI node.**
+
+by **Rikin Patel** · [Comfy Compositing](https://comfycompositing.com)
 
 SAM3 decides *what* to matte. LTX-2.5 alpha-gen decides *how the edge looks*.
 
@@ -11,13 +13,13 @@ SAM3 decides *what* to matte. LTX-2.5 alpha-gen decides *how the edge looks*.
 ![SAM3](https://img.shields.io/badge/SAM3-tracking-0d1117?style=flat-square&labelColor=2dd4bf)
 ![VRAM](https://img.shields.io/badge/VRAM-12%20GB%2B-0d1117?style=flat-square&labelColor=fb923c)
 ![RAM](https://img.shields.io/badge/RAM-16%20GB%2B-0d1117?style=flat-square&labelColor=fb923c)
-![License](https://img.shields.io/badge/license-MIT-0d1117?style=flat-square&labelColor=8b949e)
+![License](https://img.shields.io/badge/license-free%20non--commercial-0d1117?style=flat-square&labelColor=8b949e)
 
 </div>
 
-![SAM3 vs ONYX-style vs Selective Matte on the same frame](docs/images/hero_compare.jpg)
+![LTX alone vs SAM3 vs ONYX-style vs Comfy Pro Alpha Generator on the same frame](docs/images/hero_compare.jpg)
 
-<sub>Same plate, same subject, same frame. Top: matte over checker. Below: hair zoom as alpha, then comped over green. Only the generative edge keeps the individual strands against the sky.</sub>
+<sub>Task: matte the middle kid only. **LTX alpha-gen alone** has perfect hair but mattes all three kids, and there is no way to tell it which one. **SAM3** and **ONYX-style** pick the right kid but lose the strands. **Comfy Pro Alpha Generator** does both. Top: matte over checker. Below: hair zoom as alpha, then comped over green.</sub>
 
 ---
 
@@ -30,7 +32,7 @@ and each one is missing half of the answer:
 |---|:---:|:---:|---|
 | **LTX-2.5 alpha-gen** (generative) | no | hair-level | Renders the matte jointly over the whole clip, but mattes *every* main subject and can't be told which one. |
 | **SAM3 / ONYX-style** (discriminative) | yes | soft, per-frame | Tracks any object you point at, then *measures* the edge frame by frame with ViTMatte. Strands get lost; edges chatter. |
-| **Selective Matte** | **yes** | **hair-level** | SAM3 steers, LTX draws. Built from both. |
+| **Comfy Pro Alpha Generator** | **yes** | **hair-level** | SAM3 steers, LTX draws. Built from both. |
 
 ## Results
 
@@ -45,15 +47,15 @@ Every method gets the same SAM3 selection.
 | SAM3 mask | yes | 85.2% | 2.6x |
 | ONYX-style: SAM3 + ViTMatte | yes | 90.8% | 1.7x |
 | ONYX-style + temporal stabilizer | yes | 90.3% | **0.5x** |
-| **Selective Matte** | **yes** | **97.8%** | 1.2x |
+| **Comfy Pro Alpha Generator** | **yes** | **97.8%** | 1.2x |
 
 **How to read it**
-- **Hair:** Selective Matte keeps 97.8% of LTX's soft-edge alpha while matting one subject only. The ViTMatte route
+- **Hair:** it keeps 97.8% of LTX's soft-edge alpha while matting one subject only. The ViTMatte route
   tops out near 91%: it keeps a soft halo but not the strands (see the zoom above).
-- **Stability:** against background, Selective Matte flickers the same as LTX alone (0.0112 vs 0.0109 mean error per
+- **Stability:** against background, it flickers the same as LTX alone (0.0112 vs 0.0109 mean error per
   pixel). The extra 0.2x comes from the few pixels where the subject touches someone else.
 - **Honest trade-off:** a temporally stabilized ViTMatte matte is *steadier* than LTX (0.5x), because it is smooth
-  and has no strands left to move. Selective Matte trades that for real hair detail.
+  and has no strands left to move. Alpha Generator trades that for real hair detail.
 
 <details>
 <summary><b>Methodology</b></summary>
@@ -137,7 +139,7 @@ flowchart LR
 
 ## Using it
 
-<p align="center"><img src="docs/images/node_ui.jpg" width="900" alt="the Selective Matte node with its picker"></p>
+<p align="center"><img src="docs/images/node_ui.jpg" width="900" alt="the Comfy Pro Alpha Generator node with its picker"></p>
 
 1. Open `example_workflow.json` (video) or `example_sequence_workflow.json` (image sequence), or wire it yourself:
 
@@ -225,7 +227,7 @@ Use it only to save disk space: GGUF can't be streamed from disk, so it needs *m
 
 **1. Clone into `ComfyUI/custom_nodes`:**
 ```
-git clone https://github.com/rik-python/ComfyUI-SelectiveMatte.git
+git clone https://github.com/rik-python/Comfy-Pro-Alpha-Generator.git
 ```
 
 **2. Required node packs** (ComfyUI Manager can install both):
@@ -264,7 +266,14 @@ Lightricks, [SAM3](https://github.com/facebookresearch/sam3) by Meta,
 [ComfyUI-SAM3](https://github.com/PozzettiAndrea/ComfyUI-SAM3) and [ComfyUI](https://github.com/comfyanonymous/ComfyUI).
 ONYX Ai Matte is a product of its respective owner; it is referenced here only as a design comparison.
 
-**Author: Rikin Patel**, VFX compositor (Nuke) and ComfyUI educator, *Comfy Compositing*.
+**Author: Rikin Patel**, VFX compositor (Nuke) and ComfyUI educator at [Comfy Compositing](https://comfycompositing.com).
 Designed for real compositing work: one subject, plate-accurate frame numbers, 16-bit/EXR output, measurable QC.
 
-MIT License.
+## License
+
+**Free for personal and non-commercial use** under the [PolyForm Noncommercial License 1.0.0](LICENSE).
+**Commercial use** (paid client work, studio or company use, or inside a commercial product or service) needs a
+commercial license: [comfycompositing.com/contact](https://comfycompositing.com/contact).
+
+The license covers this node pack's code. The models it runs (LTX-2.5 and its IC-LoRA, SAM3, ViTMatte) and the node
+packs it depends on have their own licenses; follow those as well.

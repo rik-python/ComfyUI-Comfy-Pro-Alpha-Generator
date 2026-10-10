@@ -1,5 +1,5 @@
 /**
- * Selective Matte picker + result viewer.
+ * Comfy Pro Alpha Generator: picker + result viewer + About panel.
  *
  * Picker: scrub the plate, type what to find ("person", "dog, bike"...), Detect (SAM3 text detection on this
  * frame), click a subject = target (other detections near it are excluded automatically),
@@ -10,7 +10,10 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const NODE = "SelectiveMatte";
+const NODE = "ComfyProAlphaGenerator";
+const LEGACY = "SelectiveMatte";  // old node id: workflows saved before the rename
+const TITLE = "Comfy Pro Alpha Generator";
+const VERSION = "0.2.0";
 const ADVANCED = ["chunk", "overlap", "fast_attention",
     "seed", "control_after_generate", "erode", "dilate", "near_px", "stabilize_radius", "sam3_threshold"];
 const HIDDEN = ["picks", "render"];
@@ -35,6 +38,12 @@ const css = `
 .sm-tab.on{background:#ff8a1f;color:#111;font-weight:600}
 .sm-qc{display:flex;gap:6px;flex-wrap:wrap}.sm-badge{border-radius:10px;padding:2px 8px;font-weight:600;color:#111}
 .sm-g{background:#3ddc84}.sm-a{background:#ffc94d}.sm-r{background:#ff6b6b}
+.sm-about{flex:0 0 auto;border-top:1px solid #333a43;padding-top:4px;color:#aab2bd}
+.sm-about summary{cursor:pointer;list-style:none;user-select:none;color:#c9d1d9}
+.sm-about summary::-webkit-details-marker{display:none}
+.sm-about summary::before{content:"\\25B8  "}.sm-about[open] summary::before{content:"\\25BE  "}
+.sm-about-body{display:grid;gap:4px;padding:6px 2px 2px 14px}
+.sm-about b{color:#eee}.sm-about a{color:#2dd4bf;text-decoration:none}.sm-about a:hover{text-decoration:underline}
 `;
 
 function injectCss() {
@@ -181,6 +190,34 @@ function coverage(a, b) {
     return area ? inter / area : 0;
 }
 
+/** Collapsible "About" section at the bottom of the node: what it does, who made it, the license. */
+function aboutPanel() {
+    const link = (href, text) => {
+        const a = el("a", null, text);
+        a.href = href; a.target = "_blank"; a.rel = "noopener";
+        return a;
+    };
+    const line = (...parts) => {
+        const d = el("div");
+        d.append(...parts.map((p) => (typeof p === "string" ? document.createTextNode(p) : p)));
+        return d;
+    };
+    const details = el("details", "sm-about");
+    details.append(el("summary", null, `About ${TITLE}`));
+    const body = el("div", "sm-about-body");
+    body.append(
+        line(el("b", null, TITLE), ` v${VERSION}`),
+        line("Mattes one chosen subject with generative edge quality: SAM3 picks it, LTX-2.5 alpha-gen draws the edge."),
+        line("Created by ", el("b", null, "Rikin Patel"), " at ", link("https://comfycompositing.com", "Comfy Compositing"), "."),
+        line("Free for personal and non-commercial use (PolyForm Noncommercial 1.0.0). Commercial use needs a license: ",
+             link("https://comfycompositing.com/contact", "comfycompositing.com/contact"), "."),
+        line(link("https://github.com/rik-python/Comfy-Pro-Alpha-Generator", "Docs and updates on GitHub")),
+    );
+    details.append(body);
+    for (const ev of ["pointerdown", "mousedown"]) details.addEventListener(ev, (e) => e.stopPropagation());  // not a canvas drag
+    return details;
+}
+
 class Picker {
     constructor(node) {
         this.node = node;
@@ -267,11 +304,11 @@ class Picker {
 
         this.status = el("div", "sm-bar");
         this.qc = el("div", "sm-qc");
-        root.append(bar, view, scrub, this.status, this.qc);
+        root.append(bar, view, scrub, this.status, this.qc, aboutPanel());
 
         // Min height only, no max: the frontend gives the panel all spare node height, so it grows/shrinks when the
         // node is resized. (Never derive the height from node.size ourselves: the node grows to fit -> feedback loop.)
-        this.widget = this.node.addDOMWidget("selective_matte_ui", "sm-ui", root, {
+        this.widget = this.node.addDOMWidget("pro_alpha_ui", "sm-ui", root, {
             serialize: false, hideOnZoom: false, getMinHeight: () => 420,
         });
 
@@ -288,7 +325,7 @@ class Picker {
     async upstream() {
         const { output } = await app.graphToPrompt();
         const me = output[String(this.node.id)];
-        if (!me) throw new Error("The Selective Matte node is muted or bypassed.");
+        if (!me) throw new Error(`The ${TITLE} node is muted or bypassed.`);
         const images = me.inputs.images;
         if (!Array.isArray(images)) throw new Error("Connect the plate to the 'images' input first.");
         const prompt = {};
@@ -315,8 +352,8 @@ class Picker {
         this.loadBtn.textContent = "Loading…";
         try {
             const info = await this.helper((images, firstFrame) => ({
-                pp: { class_type: "SelectiveMatte_PlateProxy", inputs: { images, width: 960, first_frame: firstFrame } },
-            }), "pp", "selective_matte_plate");
+                pp: { class_type: "ComfyProAlpha_PlateProxy", inputs: { images, width: 960, first_frame: firstFrame } },
+            }), "pp", "comfy_pro_alpha_plate");
             const changed = this.picks.view && this.picks.view.fingerprint !== info.fingerprint;
             this.info = info;
             this.picks.view = info;
@@ -331,7 +368,7 @@ class Picker {
             this.tab = "pick";
             this.seek(Math.min(this.frame, info.frames - 1));
         } catch (e) {
-            alert(`Selective Matte: could not load the plate\n${e.message}`);
+            alert(`${TITLE}: could not load the plate\n${e.message}`);
         } finally {
             this.loadBtn.disabled = false;
             this.loadBtn.textContent = "Load plate";
@@ -451,12 +488,12 @@ class Picker {
         for (const term of prompt.split(",").map((t) => t.trim()).filter(Boolean)) {
             const token = Math.random().toString(36).slice(2, 10);
             const out = await this.helper((images) => ({
-                f: { class_type: "SelectiveMatte_Frame", inputs: { images, index: frame } },
+                f: { class_type: "ComfyProAlpha_Frame", inputs: { images, index: frame } },
                 m: { class_type: "LoadSAM3Model", inputs: { precision: "auto" } },
                 g: { class_type: "SAM3Grounding", inputs: { sam3_model_config: ["m", 0], image: ["f", 0], confidence_threshold: 0.3,
                                                            text_prompt: term, max_detections: -1 } },
-                r: { class_type: "SelectiveMatte_DetectReport", inputs: { masks: ["g", 0], frame, token } },
-            }), "r", "selective_matte_detect");
+                r: { class_type: "ComfyProAlpha_DetectReport", inputs: { masks: ["g", 0], frame, token } },
+            }), "r", "comfy_pro_alpha_detect");
             found.push(...(out.subjects || out.people || []).map((p) => ({ ...p, label: term })));
         }
         const subjects = found.sort((a, b) => a.box[0] - b.box[0]).map((p, i) => ({ ...p, id: i }));
@@ -475,7 +512,7 @@ class Picker {
             this.promptBox.value = prompt;
             const subjects = await this.detectOn(this.frame, prompt);
             if (!subjects.length) {
-                if (!quiet) alert(`Selective Matte: no "${prompt}" found on this frame. Try another word or frame.`);
+                if (!quiet) alert(`${TITLE}: no "${prompt}" found on this frame. Try another word or frame.`);
                 return;
             }
             this.frameSubjects = { [this.frame]: subjects };
@@ -486,7 +523,7 @@ class Picker {
             this.tab = "pick";
             this.render();
         } catch (e) {
-            alert(`Selective Matte: detection failed\n${e.message}`);
+            alert(`${TITLE}: detection failed\n${e.message}`);
         } finally {
             this.detectBtn.disabled = false;
             this.detectBtn.textContent = "Detect";
@@ -516,12 +553,12 @@ class Picker {
     /** SAM3 point segmentation of one click on one frame (single-frame mask preview). Resolves {mask}. */
     segmentPoint(frame, x, y, neg, token) {
         const n = {
-            f: { class_type: "SelectiveMatte_Frame", inputs: { images: null, index: frame } },
+            f: { class_type: "ComfyProAlpha_Frame", inputs: { images: null, index: frame } },
             m: { class_type: "LoadSAM3Model", inputs: { precision: "auto" } },
             p1: { class_type: "SAM3CreatePoint", inputs: { x, y, is_foreground: true } },
             c: { class_type: "SAM3CombinePoints", inputs: { point_1: ["p1", 0] } },
             s: { class_type: "SAM3Segmentation", inputs: { sam3_model_config: ["m", 0], image: ["f", 0], positive_points: ["c", 0] } },
-            r: { class_type: "SelectiveMatte_PartReport", inputs: { mask: ["s", 0], token } },
+            r: { class_type: "ComfyProAlpha_PartReport", inputs: { mask: ["s", 0], token } },
         };
         if (neg.length) {
             const negInputs = {};
@@ -535,7 +572,7 @@ class Picker {
         return this.helper((images) => {
             n.f.inputs.images = images;
             return n;
-        }, "r", "selective_matte_part");
+        }, "r", "comfy_pro_alpha_part");
     }
 
     async addPart(kind, x, y) {
@@ -569,14 +606,14 @@ class Picker {
             this.writePicks();
             this.render();
         } catch (e) {
-            console.warn("[SelectiveMatte] part preview failed", e);
+            console.warn("[ComfyProAlpha] part preview failed", e);
             part.warning = `Part preview failed: ${e.message}`;
             this.render();
         }
     }
 
     async queue(preview) {
-        if (!this.picks.target) { alert("Selective Matte: click the subject to matte (anything in the plate, or a detection after Detect)."); return; }
+        if (!this.picks.target) { alert(`${TITLE}: click the subject to matte (anything in the plate, or a detection after Detect).`); return; }
         if (this.picks.stale && !confirm("The plate changed after you picked the subject. Run anyway?")) return;
         const r = this.w.render;
         r.value = preview ? "preview chunk" : "full shot";
@@ -681,7 +718,7 @@ class Picker {
             const inside = new Set(this.subjects.filter((p) => coverage(ov, p.overlay) > 0.6).map((p) => p.id));
             this.picks.others = this.picks.others.filter((o) => !inside.has(o.id));
         } catch (e) {
-            console.warn("[SelectiveMatte] target preview failed", e);
+            console.warn("[ComfyProAlpha] target preview failed", e);
         }
         this.writePicks();
         this.render();
@@ -814,7 +851,7 @@ class Picker {
     }
 
     showResult(output) {
-        const info = output?.selective_matte?.[0];
+        const info = output?.pro_alpha?.[0];
         if (!info) return;
         this.result = { info, previews: output.previews || [], view: this.result?.view || "comp" };
         this.tab = "result";
@@ -867,9 +904,9 @@ function tintCache(p, color) {
 }
 
 app.registerExtension({
-    name: "SelectiveMatte.Picker",
+    name: "ComfyProAlpha.Picker",
     async beforeRegisterNodeDef(nodeType, nodeData) {
-        if (nodeData.name !== NODE) return;
+        if (nodeData.name !== NODE && nodeData.name !== LEGACY) return;
         const created = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             const r = created?.apply(this, arguments);
@@ -884,7 +921,7 @@ app.registerExtension({
             const named = info?.widgets_values_named;
             if (named) {
                 for (const w of this.widgets || []) {
-                    if (w.name in named && w.name !== "selective_matte_ui" && w.name !== "upload") w.value = named[w.name];
+                    if (w.name in named && w.name !== "pro_alpha_ui" && w.name !== "upload") w.value = named[w.name];
                 }
                 // Models saved from another machine (e.g. "D_drive\model.safetensors" vs "model.safetensors"):
                 // select the listed file with the same name.

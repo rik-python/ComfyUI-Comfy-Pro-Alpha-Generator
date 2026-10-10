@@ -1,4 +1,4 @@
-"""Selective-matte math (v12), ported from the CLI pipeline in workflows/matte/*.py.
+"""Comfy Pro Alpha Generator math (v12), ported from the CLI pipeline in workflows/matte/*.py.
 
 Pure numpy / OpenCV / torch, no ComfyUI node code. Masks are float32 arrays [N,H,W] in 0-1, plates are uint8
 or float arrays [N,H,W,3]. Function names and defaults match the CLI scripts so results stay comparable.

@@ -1,4 +1,4 @@
-"""Internal stage nodes. The Selective Matte node expands into these (plus SAM3 / LTX nodes) at run time.
+"""Internal stage nodes. The Comfy Pro Alpha Generator node expands into these (plus SAM3 / LTX nodes) at run time.
 
 They are registered so ComfyUI can execute them, but flagged deprecated so they stay out of node search.
 Every stage is its own cached node: switching Fast/Best or re-running a preview reuses finished stages.
@@ -17,11 +17,11 @@ from comfy_api.latest import io, ui
 from . import _engine as E
 from . import _video as V
 
-CAT = "SelectiveMatte/internal"
+CAT = "Comfy Compositing/internal"
 
 
 def _schema(node_id, inputs, outputs, output_node=False):
-    return io.Schema(node_id=node_id, display_name=node_id.replace("SelectiveMatte_", "SM "), category=CAT,
+    return io.Schema(node_id=node_id, display_name=node_id.replace("ComfyProAlpha_", "CPA "), category=CAT,
                      inputs=inputs, outputs=outputs, is_deprecated=True, is_output_node=output_node)
 
 
@@ -64,7 +64,7 @@ class Plate(io.ComfyNode):
 
     @classmethod
     def define_schema(cls):
-        return _schema("SelectiveMatte_Plate",
+        return _schema("ComfyProAlpha_Plate",
                        [io.Image.Input("images"), io.Int.Input("start", default=0), io.Int.Input("count", default=0)],
                        [io.Image.Output("plate")])
 
@@ -82,7 +82,7 @@ class LoadVideo(io.ComfyNode):
 
     @classmethod
     def define_schema(cls):
-        return _schema("SelectiveMatte_LoadVideo", [io.Image.Input("images"), io.Float.Input("fps", default=24.0)],
+        return _schema("ComfyProAlpha_LoadVideo", [io.Image.Input("images"), io.Float.Input("fps", default=24.0)],
                        [io.Video.Output("video")])
 
     @classmethod
@@ -96,7 +96,7 @@ class Frame(io.ComfyNode):
 
     @classmethod
     def define_schema(cls):
-        return _schema("SelectiveMatte_Frame", [io.Image.Input("images"), io.Int.Input("index", default=0)],
+        return _schema("ComfyProAlpha_Frame", [io.Image.Input("images"), io.Int.Input("index", default=0)],
                        [io.Image.Output("image")])
 
     @classmethod
@@ -110,7 +110,7 @@ class PlateProxy(io.ComfyNode):
 
     @classmethod
     def define_schema(cls):
-        return _schema("SelectiveMatte_PlateProxy", [io.Image.Input("images"), io.Int.Input("width", default=960),
+        return _schema("ComfyProAlpha_PlateProxy", [io.Image.Input("images"), io.Int.Input("width", default=960),
                                                      io.Int.Input("first_frame", default=1)],
                        [], output_node=True)
 
@@ -120,7 +120,7 @@ class PlateProxy(io.ComfyNode):
 
         fp = plate_fingerprint(images)
         n, h, w = images.shape[:3]
-        sub = os.path.join("selective_matte_plate", fp)
+        sub = os.path.join("comfy_pro_alpha_plate", fp)
         out_dir = os.path.join(folder_paths.get_temp_directory(), sub)
         os.makedirs(out_dir, exist_ok=True)
         size = (min(width, w), round(min(width, w) * h / w))
@@ -133,7 +133,7 @@ class PlateProxy(io.ComfyNode):
             pbar.update(1)
         info = {"frames": int(n), "width": int(w), "height": int(h), "fingerprint": fp, "subfolder": sub.replace("\\", "/"),
                 "first_frame": int(first_frame)}
-        return io.NodeOutput(ui={"selective_matte_plate": [info]})
+        return io.NodeOutput(ui={"comfy_pro_alpha_plate": [info]})
 
 
 class TrackMasks(io.ComfyNode):
@@ -145,7 +145,7 @@ class TrackMasks(io.ComfyNode):
 
     @classmethod
     def define_schema(cls):
-        return _schema("SelectiveMatte_TrackMasks", [
+        return _schema("ComfyProAlpha_TrackMasks", [
             io.Custom("SAM3_VIDEO_MASKS").Input("masks"), io.Int.Input("start", default=0),
             io.Int.Input("count", default=1), io.Int.Input("width", default=1920), io.Int.Input("height", default=1080),
         ], [io.Mask.Output("mask")])
@@ -177,7 +177,7 @@ class TrackMasks(io.ComfyNode):
 class MaskMax(io.ComfyNode):
     @classmethod
     def define_schema(cls):
-        return _schema("SelectiveMatte_MaskMax", [io.Mask.Input("a"), io.Mask.Input("b")], [io.Mask.Output("mask")])
+        return _schema("ComfyProAlpha_MaskMax", [io.Mask.Input("a"), io.Mask.Input("b")], [io.Mask.Output("mask")])
 
     @classmethod
     def execute(cls, a, b):
@@ -195,7 +195,7 @@ class EmptyPrompt(io.ComfyNode):
 
     @classmethod
     def define_schema(cls):
-        return _schema("SelectiveMatte_EmptyPrompt", [], [io.Conditioning.Output("conditioning")])
+        return _schema("ComfyProAlpha_EmptyPrompt", [], [io.Conditioning.Output("conditioning")])
 
     @classmethod
     def execute(cls):
@@ -237,7 +237,7 @@ class Refine(io.ComfyNode):
 
     @classmethod
     def define_schema(cls):
-        return _schema("SelectiveMatte_Refine", [
+        return _schema("ComfyProAlpha_Refine", [
             io.Image.Input("plate"), io.Mask.Input("target"),
             io.Mask.Input("adds", optional=True), io.Mask.Input("cuts", optional=True),
             io.Mask.Input("others", optional=True),
@@ -274,7 +274,7 @@ class Refine(io.ComfyNode):
 class Isolate(io.ComfyNode):
     @classmethod
     def define_schema(cls):
-        return _schema("SelectiveMatte_Isolate", [
+        return _schema("ComfyProAlpha_Isolate", [
             io.Image.Input("plate"), io.Mask.Input("selection"), io.Mask.Input("others"),
             io.Int.Input("grow", default=6), io.Float.Input("blur", default=6.0),
             io.Int.Input("start", default=0, optional=True),
@@ -304,7 +304,7 @@ class ChunkPad(io.ComfyNode):
 
     @classmethod
     def define_schema(cls):
-        return _schema("SelectiveMatte_ChunkPad", [
+        return _schema("ComfyProAlpha_ChunkPad", [
             io.Image.Input("images"), io.Int.Input("start", default=0), io.Int.Input("length", default=49),
             io.Int.Input("end", default=-1),
         ], [io.Image.Output("chunk")])
@@ -329,7 +329,7 @@ class DecodeAlpha(io.ComfyNode):
 
     @classmethod
     def define_schema(cls):
-        return _schema("SelectiveMatte_DecodeAlpha", [io.Latent.Input("samples"), io.Vae.Input("vae")],
+        return _schema("ComfyProAlpha_DecodeAlpha", [io.Latent.Input("samples"), io.Vae.Input("vae")],
                        [io.Mask.Output("alpha")])
 
     @classmethod
@@ -346,7 +346,7 @@ class Stitch(io.ComfyNode):
 
     @classmethod
     def define_schema(cls):
-        return _schema("SelectiveMatte_Stitch",
+        return _schema("ComfyProAlpha_Stitch",
                        [io.String.Input("plan")] + [io.Mask.Input(f"chunk_{i}", optional=True) for i in range(cls.MAX)],
                        [io.Mask.Output("alpha")])
 
@@ -394,7 +394,7 @@ def _previews(plate, alpha, every):
     from PIL import Image
 
     tmp = folder_paths.get_temp_directory()
-    sub = "selective_matte_preview"
+    sub = "comfy_pro_alpha_preview"
     os.makedirs(os.path.join(tmp, sub), exist_ok=True)
     tag = os.urandom(4).hex()
     items = []
@@ -416,10 +416,10 @@ def _previews(plate, alpha, every):
 class Final(io.ComfyNode):
     @classmethod
     def define_schema(cls):
-        return _schema("SelectiveMatte_Final", [
+        return _schema("ComfyProAlpha_Final", [
             io.Image.Input("plate"), io.Mask.Input("ltx"), io.Mask.Input("ltx_isolated", optional=True),
             io.Mask.Input("selection"), io.Mask.Input("refined"), io.Mask.Input("others"),
-            io.Int.Input("near_px", default=15), io.String.Input("filename_prefix", default="selective_matte/shot"),
+            io.Int.Input("near_px", default=15), io.String.Input("filename_prefix", default="comfy_pro_alpha/shot"),
             io.Combo.Input("format", options=["png16", "exr"]), io.Int.Input("first_frame", default=1),
             io.Boolean.Input("save", default=True), io.Boolean.Input("qc", default=True),
             io.Boolean.Input("comp", default=True),
@@ -455,7 +455,7 @@ class Final(io.ComfyNode):
             comp_t = torch.zeros(1, 64, 64, 3)
         info = {"mode": mode, "frames": n, "first_frame": first_frame, "out_dir": out_dir, "format": format,
                 "ltx_cover": float(np.mean(cover) * 100), **{k: float(v) for k, v in score.items()}}
-        ui_out = {"selective_matte": [info], "previews": _previews(p, alpha, max(1, n // 48))}
+        ui_out = {"pro_alpha": [info], "previews": _previews(p, alpha, max(1, n // 48))}
         return io.NodeOutput(torch.from_numpy(alpha), comp_t, ui=ui_out)
 
 
@@ -466,7 +466,7 @@ class DetectReport(io.ComfyNode):
 
     @classmethod
     def define_schema(cls):
-        return _schema("SelectiveMatte_DetectReport",
+        return _schema("ComfyProAlpha_DetectReport",
                        [io.Mask.Input("masks"), io.Int.Input("frame", default=0), io.String.Input("token", default="")],
                        [], output_node=True)
 
@@ -478,7 +478,7 @@ class DetectReport(io.ComfyNode):
         if m.ndim == 2:
             m = m[None]
         tmp = folder_paths.get_temp_directory()
-        sub = "selective_matte_detect"
+        sub = "comfy_pro_alpha_detect"
         os.makedirs(os.path.join(tmp, sub), exist_ok=True)
         subjects = []
         h, w = m.shape[1:]
@@ -492,7 +492,7 @@ class DetectReport(io.ComfyNode):
             subjects.append({"id": len(subjects), "box": [(x0 + x1) / 2, (y0 + y1) / 2, x1 - x0, y1 - y0],
                            "area": float((mk > 0.5).mean()),
                            "mask": {"filename": name, "subfolder": sub, "type": "temp"}})
-        return io.NodeOutput(ui={"selective_matte_detect": [{"frame": frame, "token": token, "subjects": subjects}]})
+        return io.NodeOutput(ui={"comfy_pro_alpha_detect": [{"frame": frame, "token": token, "subjects": subjects}]})
 
 
 class PartReport(io.ComfyNode):
@@ -500,7 +500,7 @@ class PartReport(io.ComfyNode):
 
     @classmethod
     def define_schema(cls):
-        return _schema("SelectiveMatte_PartReport",
+        return _schema("ComfyProAlpha_PartReport",
                        [io.Mask.Input("mask"), io.String.Input("token", default="")], [], output_node=True)
 
     @classmethod
@@ -510,11 +510,11 @@ class PartReport(io.ComfyNode):
         m = _np(mask)
         m = m[0] if m.ndim == 3 else m
         tmp = folder_paths.get_temp_directory()
-        sub = "selective_matte_detect"
+        sub = "comfy_pro_alpha_detect"
         os.makedirs(os.path.join(tmp, sub), exist_ok=True)
         name = f"part_{token}.png"
         Image.fromarray(((m > 0.5) * 255).astype(np.uint8), "L").save(os.path.join(tmp, sub, name))
-        return io.NodeOutput(ui={"selective_matte_part": [{"token": token,
+        return io.NodeOutput(ui={"comfy_pro_alpha_part": [{"token": token,
                                                           "mask": {"filename": name, "subfolder": sub, "type": "temp"}}]})
 
 

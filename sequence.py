@@ -1,4 +1,5 @@
 """Load Plate Sequence: a VFX image sequence (PNG/JPG/TIF/EXR) as IMAGE + fps + its own first frame number."""
+import dataclasses
 import os
 
 import numpy as np
@@ -14,9 +15,9 @@ class LoadPlateSequence(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id="SelectiveMatte_LoadPlateSequence",
+            node_id="ComfyProAlpha_LoadPlateSequence",
             display_name="Load Plate Sequence",
-            category="SelectiveMatte",
+            category="Comfy Compositing",
             description="Image sequence -> IMAGE. Keeps the plate's frame numbers (first_frame) so the matte comes "
                         "out as alpha_01001... EXR is treated as scene-linear and converted to sRGB.",
             inputs=[
@@ -57,3 +58,11 @@ class LoadPlateSequence(io.ComfyNode):
         images = torch.from_numpy(np.stack(frames)).float() / 255.0
         first_frame = files[0][0] if files[0][0] is not None else 1
         return io.NodeOutput(images, fps, first_frame)
+
+
+class LegacyLoadPlateSequence(LoadPlateSequence):
+    """The node's id before the rename. Workflows saved with it still open and run; hidden from the node menu."""
+
+    @classmethod
+    def define_schema(cls):
+        return dataclasses.replace(super().define_schema(), node_id="SelectiveMatte_LoadPlateSequence", is_deprecated=True)

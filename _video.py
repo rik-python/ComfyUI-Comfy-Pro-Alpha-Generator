@@ -78,7 +78,7 @@ def read_image(path):
 def proxy_mp4(images, fps, key):
     """IMAGE batch -> cached high-quality mp4 for SAM3's streaming tracker (SAM3 only needs to find the subject;
     LTX and the matte math use the images themselves)."""
-    out_dir = os.path.join(folder_paths.get_temp_directory(), "selective_matte_seq")
+    out_dir = os.path.join(folder_paths.get_temp_directory(), "comfy_pro_alpha_seq")
     os.makedirs(out_dir, exist_ok=True)
     out = os.path.join(out_dir, f"{key}_{fps:.3f}.mp4")
     if os.path.isfile(out):
