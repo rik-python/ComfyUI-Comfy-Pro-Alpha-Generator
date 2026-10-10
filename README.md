@@ -148,7 +148,7 @@ flowchart LR
 
 ## Using it
 
-<p align="center"><img src="docs/images/node_ui.jpg" width="900" alt="the Comfy Pro Alpha Generator node with its picker"></p>
+<p align="center"><img src="docs/images/node_ui.jpg" width="620" alt="the Comfy Pro Alpha Generator node with its picker"></p>
 
 1. Open `example_workflow.json` (video) or `example_sequence_workflow.json` (image sequence), or wire it yourself:
 
@@ -163,8 +163,12 @@ flowchart LR
 
    Any nodes can sit in between (crop, resize, colour). **Best quality at 1920x1088** (1920x1080 is padded
    automatically): LTX alpha-gen is tuned for that size. For 4K plates, matte a 1080p proxy and scale the alpha up.
-2. Click **Load plate**. It runs the nodes feeding `images` and fills the scrubber.
-3. Scrub to a frame where the subject is fully visible, type what to find and press **Detect**:
+The node walks you through three steps (**Plate → Subject → Render**); it only shows the next action.
+
+2. **Plate.** Click the big **Load plate** button. It runs the nodes feeding `images` and fills the scrubber.
+3. **Subject.** Scrub to a frame where the subject is fully visible and **click it**. It turns orange; every other
+   person or object the click finds is excluded. Shift-click more objects to add them: the man, his glass and the
+   table give one matte. Hard to click? Type it in **Find** (top right of the viewer):
 
    | Type | Finds |
    |---|---|
@@ -172,10 +176,7 @@ flowchart LR
    | `dog`, `red car`, `bike`, `woman` | any SAM3 concept |
    | `dog, person` | both: also paints out the people near a dog |
 
-4. **Click the subject.** It turns orange; every other detection is excluded.
-   **No typing needed:** click anything that is not a detection (a table, a prop) and SAM3 segments it.
-   Shift-click more objects to add them: the man, his glass and the table give one matte.
-5. Fix parts if needed, on the first frame the part appears (tracking runs forward):
+4. Fix parts if needed, on the first frame the part appears (tracking runs forward):
 
    | Action | What it does |
    |---|---|
@@ -183,8 +184,9 @@ flowchart LR
    | **Shift-click** | **Add** a part: the subject's own hand that SAM3 missed |
    | **Ctrl-click** | Remove a cut or add marker |
 
-6. **Preview chunk** (49 frames), then check the **Result** tab: drag to wipe plate against comp.
-7. **Run full shot.** The alpha is saved to `ComfyUI/output/<filename_prefix>/alpha_00001.png …`,
+5. **Render.** **Preview 49 frames** first (a few minutes). The result opens on the alpha; drag to wipe it
+   against the plate, **Show comp** for the comp.
+6. **Render full shot.** The alpha is saved to `ComfyUI/output/<filename_prefix>/alpha_00001.png …`,
    16-bit PNG by default or half-float EXR.
 
 | Quality | What it does |
@@ -201,8 +203,9 @@ flowchart LR
 | LTX cover | How much of the subject LTX matted (the rest uses ViTMatte) | ≥ 90% |
 
 `⚙ Advanced`: frames per chunk, overlap frames, seed, temporal smoothing, trimap erode/dilate, the zone near other
-subjects, SAM3 threshold and `fast_attention`. Hover any model selector for the recommended file and folder; press
-**R** after adding models.
+subjects, SAM3 threshold, `fast_attention` and the optional text encoder. Hover any model selector for the
+recommended file and folder; press **R** after adding models. A missing model shows as `MISSING: <file>`, and the
+run stops with the download link instead of failing halfway.
 
 ---
 
@@ -247,10 +250,27 @@ Use it only to save disk space: GGUF can't be streamed from disk, so it needs *m
 
 ## Install
 
-**1. Clone into `ComfyUI/custom_nodes`:**
+**Requirements**
+
+| | |
+|---|---|
+| ComfyUI | 0.38 or newer |
+| GPU | NVIDIA, 12 GB+ VRAM (developed on an RTX 5090) |
+| RAM | 16 GB+ with the models on an NVMe SSD, otherwise 64 GB (see [Hardware](#hardware)) |
+| Disk | about 28 GB for the models |
+| Node packs | [ComfyUI-SAM3](https://github.com/PozzettiAndrea/ComfyUI-SAM3), [ComfyUI-LTXVideo](https://github.com/Lightricks/ComfyUI-LTXVideo) |
+| Python packages | `opencv-python-headless`, `transformers`, `huggingface_hub`, `av` (installed by step 1) |
+| Account | free [Hugging Face](https://huggingface.co) account, to accept the LTX model license |
+
+**1. Install this node pack.** Easiest: ComfyUI Manager > **Install via Git URL** > paste
+`https://github.com/rik-python/ComfyUI-Comfy-Pro-Alpha-Generator.git` (it installs the Python packages too).
+Or by hand, from a terminal **inside `ComfyUI/custom_nodes`** (ComfyUI's own Python environment active):
 ```
+cd ComfyUI/custom_nodes
 git clone https://github.com/rik-python/ComfyUI-Comfy-Pro-Alpha-Generator.git
+pip install -r ComfyUI-Comfy-Pro-Alpha-Generator/requirements.txt
 ```
+Restart ComfyUI afterwards.
 
 **2. Required node packs** (ComfyUI Manager can install both):
 - [ComfyUI-SAM3](https://github.com/PozzettiAndrea/ComfyUI-SAM3)
@@ -276,8 +296,8 @@ git clone https://github.com/rik-python/ComfyUI-Comfy-Pro-Alpha-Generator.git
 | 6 | ViTMatte `vitmatte-base-composition-1k` | 0.4 GB | **automatic** on first run ([hustvl/vitmatte-base-composition-1k](https://huggingface.co/hustvl/vitmatte-base-composition-1k)) | `models/vitmatte/vitmatte-base-composition-1k/` |
 
 > **Use the conv video VAE (#3)**, `...-video-vae-conv-bf16`, not `...-video-vae-bf16`: only the conv VAE can encode
-> the plate that guides alpha-gen. **No text encoder needed**: the pack ships the empty-prompt conditioning, so
-> `text encoder` stays on *built-in*.
+> the plate that guides alpha-gen. **No text encoder needed**: the pack ships the empty-prompt conditioning
+> (the option sits under ⚙ Advanced; leave it on *built-in*).
 
 <details>
 <summary><b>Optional files</b></summary>
@@ -329,18 +349,27 @@ Press **R** in ComfyUI after adding files. **Low-RAM tip:** keep `models/` on an
 
 <sub><code>// 07 · limits</code></sub>
 
-## Limits
+## What it can and can't do
 
-- Tracks start at the frame you detected on; frames before it come out empty.
-- Where two subjects overlap, the edge *position* between them comes from SAM3/ViTMatte, not LTX. Where a hand or
-  arm crosses in front of the subject, expect a soft transition there.
-- LTX mattes what it reads as the **main** subject. A background object (a parked car behind the action) can come
-  out empty; the LTX cover badge goes red and that area uses the ViTMatte edge.
-- If something fully covers the subject (a car driving in front of it), SAM3 can lose the track. Pick on a frame
-  after the occlusion, or split the shot.
-- Up to 8 other detections (nearest first) are excluded; each costs a SAM3 track, about 14 s per preview.
-- Light fringes on hair are colour spill from the plate. Despill in comp.
-- Shots are limited to 24 chunks (about 960 frames). Split longer shots.
+| Spec | Value |
+|---|---|
+| Best resolution | **1920x1088** (a 1920x1080 plate is padded automatically). LTX alpha-gen is tuned for this size. |
+| Other sizes | Work, but edges get softer; at half resolution the subject's alpha visibly drops. |
+| 4K and up | Matte a 1080p proxy and scale the alpha up. |
+| Shot length | Up to 24 chunks, about **960 frames** at the default settings. Split longer shots. |
+| Frame range | From the frame you pick on to the end of the plate; earlier frames come out empty. |
+| Speed (RTX 5090, Best) | 49-frame preview about 4 min; a 247-frame shot about 25 min. |
+| Output | Alpha as 16-bit PNG or half-float EXR, plate frame numbers kept (`plate.1001` gives `alpha_01001`). |
+| Subjects | One matte per run; it can stack several objects (a man, his glass and the table). |
+
+| Works well | Works with care | Doesn't work (yet) |
+|---|---|---|
+| People, hair, animals with fur, vehicles with dust, props | A hand or arm crossing another person: the edge between them comes from SAM3/ViTMatte, so it is softer | Frames before the pick frame |
+| Busy shots with several people (the others are painted out) | Background objects (a parked car): LTX mattes what it reads as the main subject; the **LTX cover** badge goes red and ViTMatte takes over | A subject fully hidden mid-shot (a car driving in front): SAM3 can lose the track. Pick after the occlusion or split the shot |
+| Video files and EXR/PNG/TIF sequences | More than 8 other subjects near the target: only the nearest 8 are painted out (each costs about 14 s) | Despill: light hair fringes are plate colour spill. Despill in comp |
+| 12 GB VRAM, 16 GB RAM machines (slower) | | |
+
+**Not tested yet:** plates smaller than 1080p, vertical video, heavy motion blur, AMD and Apple GPUs.
 
 <sub><code>// 08 · credits</code></sub>
 

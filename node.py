@@ -17,15 +17,27 @@ from . import _engine as E
 from .internal import plate_fingerprint
 
 NONE = "(none found)"
+MISSING = "MISSING: "  # combo placeholder when the recommended file is not installed (never fall back to a random model)
 BUILTIN = "built-in empty prompt (no text encoder needed)"
-# widget -> (models folder, preferred file, where to get it): shown as tooltips and in "missing model" errors
+LTX = "https://huggingface.co/Lightricks/LTX-2.5/blob/main/"
+# widget -> (models folder, preferred file, download link): shown as tooltips and in "missing model" errors
 MODELS = {
-    "ltx_model": ("diffusion_models", "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors"),
-    "alpha_lora": ("loras", "ltx-2.5-22b-ic-lora-alpha-gen-0.9.safetensors"),
-    "text_encoder": ("text_encoders", "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors"),
-    "video_vae": ("vae", "ltx-2.5-video-vae-conv-bf16.safetensors"),
-    "audio_vae": ("vae", "ltx-2.5-audio-vae-bf16.safetensors"),
+    "ltx_model": ("diffusion_models", "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
+                  LTX + "diffusion_models/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors"),
+    "alpha_lora": ("loras", "ltx-2.5-22b-ic-lora-alpha-gen-0.9.safetensors",
+                   "https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Alpha-Gen/blob/main/ltx-2.5-22b-ic-lora-alpha-gen-0.9.safetensors"),
+    "text_encoder": ("text_encoders", "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+                     LTX + "text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors"),
+    "video_vae": ("vae", "ltx-2.5-video-vae-conv-bf16.safetensors", LTX + "vae/ltx-2.5-video-vae-conv-bf16.safetensors"),
+    "audio_vae": ("vae", "ltx-2.5-audio-vae-bf16.safetensors", LTX + "vae/ltx-2.5-audio-vae-bf16.safetensors"),
 }
+# Other files that are fine in a slot (a renamed copy, the low-RAM GGUF). Anything else is never auto-selected.
+ALSO_OK = {
+    "ltx_model": lambda n: "ltx" in n and "2.5" in n and "distilled" in n,
+    "video_vae": lambda n: "ltx" in n and "2.5" in n and "video" in n and "conv" in n,
+}
+# Node packs the expansion needs: node type -> pack name (checked before running, so the error says what to install).
+PACKS = {"LoadSAM3Model": "ComfyUI-SAM3", "LTXAddVideoICLoRAGuide": "ComfyUI-LTXVideo"}
 QUALITY = ["Best (v12, 2 LTX passes)", "Fast (v7, 1 LTX pass)"]
 RENDER = ["full shot", "preview chunk"]
 SIGMAS = "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
@@ -42,25 +54,49 @@ def _names(widget):
     return names
 
 
+def _base(name):
+    return name.replace("\\", "/").split("/")[-1]
+
+
 def _models(widget):
-    """Files in the widget's models folder, the recommended one first. Re-read every time the node definitions
-    are fetched, so after dropping a model in the folder, pressing R (refresh) in ComfyUI lists it."""
-    kind, prefer = MODELS[widget]
+    """Files in the widget's models folder, the recommended one first. If it is not installed the first option is
+    'MISSING: <file>' so a new user never runs on some unrelated model by accident (a Flux VAE crashes deep inside
+    LTX). Re-read every time the node definitions are fetched: after adding a file, press R in ComfyUI."""
+    kind, prefer, _ = MODELS[widget]
     names = _names(widget)
-    best = next((n for n in names if n.replace("\\", "/").split("/")[-1] == prefer), None)
-    best = best or next((n for n in names if prefer.rsplit("-", 1)[0] in n), None)
-    return ([best] if best else []) + [n for n in names if n != best] or [NONE]
+    ok = ALSO_OK.get(widget, lambda n: False)
+    best = next((n for n in names if _base(n) == prefer), None) or next((n for n in names if ok(_base(n).lower())), None)
+    head = [best] if best else [MISSING + prefer]
+    return head + [n for n in names if n != best]
+
+
+def _model_problem(widget, value):
+    """Why a model slot cannot run, as a message a new user can act on (None = fine)."""
+    kind, prefer, url = MODELS[widget]
+    get = f"download {prefer} from {url} into ComfyUI/models/{kind}/, then press R"
+    if not value or value == NONE or value.startswith(MISSING):
+        return f"{widget}: not installed. {get}"
+    if _resolve(widget, value) not in _names(widget):
+        return f"{widget}: '{value}' is not in ComfyUI/models/{kind}/. {get}"
+    low = _base(value).lower()
+    if widget == "ltx_model" and "ltx" not in low:
+        return f"{widget}: '{value}' is not an LTX-2.5 model. {get}"
+    if widget == "video_vae" and "conv" not in low:
+        return f"{widget}: '{value}' is not the LTX-2.5 conv video VAE (only the conv VAE can encode the plate). {get}"
+    if widget == "alpha_lora" and "alpha" not in low:
+        return f"{widget}: '{value}' is not the alpha-gen IC-LoRA. {get}"
+    return None
 
 
 def _model_input(widget, label):
-    kind, prefer = MODELS[widget]
+    kind, prefer, _ = MODELS[widget]
     tip = f"Recommended: {prefer} | folder: ComfyUI/models/{kind}/ (press R after adding files)"
     if widget == "ltx_model":
         tip += (" | Low RAM/VRAM: LTX-2.5-Distilled-Q4_K_M.gguf (needs the ComfyUI-GGUF node pack); "
                 "keep models on an NVMe SSD so ComfyUI streams them from disk")
     if widget == "text_encoder":
         # Alpha-gen uses an empty prompt; its conditioning ships with the pack, so the encoder is optional.
-        files = [n for n in _models(widget) if n != NONE]
+        files = [n for n in _models(widget) if not n.startswith(MISSING)]
         return io.Combo.Input(widget, options=[BUILTIN] + files, default=BUILTIN, display_name=label, tooltip=(
             f"{BUILTIN}: same result, skips loading the 13 GB encoder. Or pick {prefer} from ComfyUI/models/{kind}/"))
     return io.Combo.Input(widget, options=_models(widget), display_name=label, tooltip=tip)
@@ -153,10 +189,15 @@ class ComfyProAlphaGenerator(io.ComfyNode):
 
     @classmethod
     def validate_inputs(cls, picks, **kw):
-        missing = [f"{w}: put {prefer} in ComfyUI/models/{kind}/ then press R"
-                   for w, (kind, prefer) in MODELS.items() if kw.get(w) == NONE]
-        if missing:
-            return "Missing model(s): " + "; ".join(missing)
+        import nodes
+        packs = sorted({p for t, p in PACKS.items() if t not in nodes.NODE_CLASS_MAPPINGS})
+        if packs:
+            return f"Missing node pack(s): {', '.join(packs)}. Install with the Manager (Custom Nodes Manager), then restart ComfyUI."
+        problems = [_model_problem(w, kw.get(w)) for w in MODELS
+                    if not (w == "text_encoder" and kw.get(w) == BUILTIN)]
+        problems = [p for p in problems if p]
+        if problems:
+            return "Model setup: " + " | ".join(problems)
         try:
             p = json.loads(picks or "{}")
         except ValueError:

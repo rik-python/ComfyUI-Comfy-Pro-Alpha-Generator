@@ -1,7 +1,7 @@
 /**
  * Comfy Pro Alpha Generator: picker + result viewer + About panel.
  *
- * Picker: scrub the plate, type what to find ("person", "dog, bike"...), Detect (SAM3 text detection on this
+ * Picker: scrub the plate, type what to find ("person", "dog, bike"...), Find (SAM3 text detection on this
  * frame), click a subject = target (other detections near it are excluded automatically),
  * Alt-click = cut a part (someone else's hand),
  * Shift-click = add a part (own hand SAM3 missed), Ctrl-click = remove the nearest cut/add.
@@ -14,7 +14,7 @@ const NODE = "ComfyProAlphaGenerator";
 const LEGACY = "SelectiveMatte";  // old node id: workflows saved before the rename
 const TITLE = "Comfy Pro Alpha Generator";
 const VERSION = "0.2.0";
-const ADVANCED = ["chunk", "overlap", "fast_attention",
+const ADVANCED = ["text_encoder", "chunk", "overlap", "fast_attention",
     "seed", "control_after_generate", "erode", "dilate", "near_px", "stabilize_radius", "sam3_threshold"];
 const HIDDEN = ["picks", "render"];
 // Comfy Compositing brand (comfycompositing.com), adapted to ComfyUI's dark canvas.
@@ -31,35 +31,73 @@ const MONO = `"JetBrains Mono", "Cascadia Mono", Consolas, monospace`;
 const css = `
 .sm-root{display:flex;flex-direction:column;gap:7px;font:12px/1.35 ${SANS};color:${BRAND.text};width:100%;height:100%;box-sizing:border-box}
 .sm-bar{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
-.sm-btn{--c:${BRAND.muted};background:transparent;border:1px solid var(--c);color:var(--c);border-radius:999px;padding:3px 11px;cursor:pointer;font:11px/1.4 ${MONO};letter-spacing:.01em;transition:background .12s}
-.sm-btn:hover{background:color-mix(in srgb,var(--c) 16%,transparent)}
-.sm-btn.blue{--c:${BRAND.blue}}.sm-btn.purple{--c:${BRAND.purple}}.sm-btn.amber{--c:${BRAND.amber}}
-.sm-btn.fill{background:var(--c);color:${BRAND.navy};font-weight:600}.sm-btn.fill:hover{filter:brightness(1.08);background:var(--c)}
-.sm-btn.ghost{--c:${BRAND.muted};border-color:transparent}
-.sm-btn:disabled{opacity:.4;cursor:default}
-.sm-input{background:${BRAND.navy};border:1px solid ${BRAND.line};color:${BRAND.text};border-radius:999px;padding:3px 11px;font:11px/1.4 ${MONO};width:150px;outline:none}
-.sm-input:focus{border-color:${BRAND.purple}}
+.sm-root [hidden]{display:none!important}
+.sm-sp{flex:1 1 0;min-width:0}
+.sm-stepper{display:flex;align-items:center;gap:8px;min-height:30px}
+.sm-st{display:flex;align-items:center;gap:7px;font:600 12.5px/1 ${SANS};color:${BRAND.muted};white-space:nowrap}
+.sm-st-dot{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;box-sizing:border-box;border:1.5px solid ${BRAND.line};font:700 10.5px/1 ${SANS};color:${BRAND.muted}}
+.sm-st.now{color:${BRAND.text}}.sm-st.now .sm-st-dot{background:${BRAND.purple};border-color:${BRAND.purple};color:${BRAND.navy}}
+.sm-st.done .sm-st-dot{border-color:${BRAND.good};color:${BRAND.good};font-size:0}.sm-st.done .sm-st-dot::before{content:"✓";font-size:12px}
+.sm-st-line{flex:0 1 40px;min-width:12px;height:0;border-top:1.5px solid ${BRAND.line}}
+.sm-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.sm-ov-tl,.sm-ov-tr{position:absolute;top:10px;z-index:2}.sm-ov-tl{left:10px}.sm-ov-tr{right:10px}
+.sm-empty{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:20px;text-align:center}
+.sm-empty-title{font:700 16px/1.2 ${SANS};color:${BRAND.text}}
+.sm-empty-text{font:12.5px/1.45 ${SANS};color:${BRAND.muted};max-width:46ch}
+.sm-btn.big{--h:38px;padding:0 20px;font-size:13.5px}
+.sm-btn.icon{padding:0;width:30px}
+.sm-btn,.sm-find,.sm-seg{--h:30px;height:var(--h);box-sizing:border-box;border-radius:8px}
+.sm-btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;padding:0 12px;background:${BRAND.navy2};border:1px solid ${BRAND.line};color:${BRAND.text};cursor:pointer;font:600 12px/1 ${SANS};white-space:nowrap;text-decoration:none}
+.sm-btn svg{width:14px;height:14px;flex:0 0 14px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;opacity:.85}
+.sm-btn:hover{background:${BRAND.navy3};border-color:#4a4a80}
+.sm-btn.primary{background:${BRAND.amber};border-color:${BRAND.amber};color:${BRAND.navy}}
+.sm-btn.primary svg{fill:currentColor;stroke:none;opacity:1}
+.sm-btn.primary:hover{filter:brightness(1.07)}
+.sm-btn.quiet{background:transparent;border-color:transparent;color:${BRAND.muted}}
+.sm-btn.quiet:hover{background:${BRAND.navy2};color:${BRAND.text}}
+.sm-btn:disabled{opacity:.4;cursor:default;filter:none}
+.sm-btn.primary:disabled{background:${BRAND.navy2};border-color:${BRAND.line};color:${BRAND.text}}
+.sm-btn.primary:disabled svg{fill:currentColor}
+.sm-btn:disabled:hover{background:${BRAND.navy2};border-color:${BRAND.line}}
+.sm-btn:focus-visible,.sm-seg button:focus-visible,.sm-about summary:focus-visible{outline:2px solid ${BRAND.purple};outline-offset:2px}
+.sm-find{width:240px;max-width:calc(100% - 20px);display:flex;align-items:stretch;border:1px solid ${BRAND.line};background:${BRAND.navy};overflow:hidden}
+.sm-find:focus-within{border-color:${BRAND.purple}}
+.sm-input{flex:1;min-width:0;background:transparent;border:0;color:${BRAND.text};padding:0 10px;font:12.5px/1 ${SANS};outline:none}
+.sm-input::placeholder{color:${BRAND.muted}}
+.sm-find .sm-btn{height:auto;border:0;border-left:1px solid ${BRAND.line};border-radius:0}
 .sm-view{position:relative;flex:1 1 auto;min-height:120px;background:#0b0b1d;border:1px solid ${BRAND.line};border-radius:10px;overflow:hidden}
 .sm-view canvas{position:absolute;inset:0;width:100%;height:100%}
 .sm-hint{position:absolute;left:8px;bottom:8px;right:8px;background:#0b0b1dcc;border-radius:8px;padding:5px 9px;pointer-events:none}
 .sm-chip{display:inline-flex;gap:5px;align-items:center;background:${BRAND.navy};border:1px solid ${BRAND.line};border-radius:999px;padding:1px 9px;font:10.5px/1.6 ${MONO};color:${BRAND.muted}}
 .sm-dot{width:7px;height:7px;border-radius:50%}
 .sm-scrub{display:flex;gap:8px;align-items:center;font:10.5px ${MONO};color:${BRAND.muted}}.sm-scrub input{flex:1;accent-color:${BRAND.purple}}
-.sm-tabs{display:flex;gap:2px;background:${BRAND.navy};border:1px solid ${BRAND.line};border-radius:999px;padding:2px}
-.sm-tab{padding:2px 11px;border-radius:999px;cursor:pointer;font:11px/1.4 ${MONO};color:${BRAND.muted}}
-.sm-tab.on{background:${BRAND.purple};color:${BRAND.navy};font-weight:600}
+.sm-seg{display:inline-flex;gap:2px;background:${BRAND.navy};border:1px solid ${BRAND.line};padding:2px}
+.sm-seg button{border:0;background:none;padding:0 14px;border-radius:6px;cursor:pointer;font:600 12px/1 ${SANS};color:${BRAND.muted}}
+.sm-seg button:hover{color:${BRAND.text}}
+.sm-seg button.on{background:${BRAND.purple};color:${BRAND.navy}}
 .sm-qc{display:flex;gap:6px;flex-wrap:wrap}
 .sm-badge{--c:${BRAND.muted};border:1px solid var(--c);color:var(--c);background:color-mix(in srgb,var(--c) 12%,transparent);border-radius:999px;padding:1px 9px;font:600 10.5px/1.6 ${MONO}}
 .sm-g{--c:${BRAND.good}}.sm-a{--c:${BRAND.amber}}.sm-r{--c:${BRAND.bad}}
-.sm-about{flex:0 0 auto;border-top:1px solid ${BRAND.line};padding-top:6px;color:${BRAND.muted}}
-.sm-about summary{cursor:pointer;list-style:none;user-select:none;display:flex;align-items:center;gap:8px;font:10.5px/1.6 ${MONO};letter-spacing:.06em;text-transform:uppercase}
+.sm-about{flex:0 0 auto;position:relative;background:linear-gradient(180deg,${BRAND.navy3},${BRAND.navy2});border:1px solid ${BRAND.line};border-radius:10px;color:${BRAND.muted};overflow:hidden}
+.sm-about::before{content:"";position:absolute;left:0;right:0;top:0;height:3px;background:linear-gradient(90deg,${BRAND.blue},${BRAND.purple},${BRAND.amber})}
+.sm-about summary{cursor:pointer;list-style:none;user-select:none;display:flex;align-items:center;gap:12px;padding:13px 14px 11px}
 .sm-about summary::-webkit-details-marker{display:none}
-.sm-about summary::after{content:"+";margin-left:auto;color:${BRAND.muted}}.sm-about[open] summary::after{content:"\u2212"}
-.sm-motif{display:inline-flex;align-items:center;gap:0}
-.sm-motif i{width:6px;height:6px;border-radius:50%;display:block}.sm-motif s{width:12px;border-top:1px dashed ${BRAND.muted};display:block;opacity:.7}
-.sm-about-body{display:grid;gap:4px;padding:8px 2px 2px}
-.sm-about b{color:${BRAND.text}}.sm-about a{color:${BRAND.blue};text-decoration:none}.sm-about a:hover{text-decoration:underline}
-.sm-about .sm-name{font:600 15px/1.2 ${SANS};color:${BRAND.text}}.sm-about .sm-name em{font-style:normal;color:${BRAND.purple}}
+.sm-id{display:grid;gap:3px;min-width:0}
+.sm-name{display:flex;align-items:baseline;gap:8px;font:700 15px/1.15 ${SANS};color:${BRAND.text};letter-spacing:-.005em}
+.sm-ver{font:500 10.5px/1 ${MONO};color:${BRAND.muted};border:1px solid ${BRAND.line};border-radius:5px;padding:2px 5px}
+.sm-by{font:12px/1.3 ${SANS};color:${BRAND.muted}}.sm-by b{color:${BRAND.text};font-weight:600}
+.sm-more{margin-left:auto;flex:0 0 auto;height:30px;box-sizing:border-box;display:inline-flex;align-items:center;gap:8px;font:600 12px/1 ${SANS};color:${BRAND.text};background:${BRAND.navy2};border:1px solid ${BRAND.line};border-radius:8px;padding:0 12px}
+.sm-about summary:hover .sm-more{background:${BRAND.navy3};border-color:#4a4a80}
+.sm-more::after{content:"";width:6px;height:6px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:translateY(-2px) rotate(45deg);transition:transform .15s}
+.sm-about[open] .sm-more::after{transform:translateY(1px) rotate(-135deg)}
+.sm-motif{display:inline-flex;align-items:center;gap:0;flex:0 0 auto}
+.sm-motif i{width:8px;height:8px;border-radius:50%;display:block}.sm-motif s{width:12px;border-top:1.5px dashed ${BRAND.muted};display:block;opacity:.7}
+.sm-about-body{display:grid;gap:10px;padding:2px 14px 14px;font:12.5px/1.5 ${SANS};color:#c6c6de;max-width:72ch}
+.sm-about-body p{margin:0}
+.sm-about-links{display:flex;gap:8px;flex-wrap:wrap}
+.sm-about-links a{text-decoration:none}
+.sm-about b{color:${BRAND.text}}
+@media (prefers-reduced-motion:reduce){.sm-more::after{transition:none}}
 `;
 
 function injectCss() {
@@ -75,6 +113,31 @@ function el(tag, cls, text) {
     if (cls) e.className = cls;
     if (text != null) e.textContent = text;
     return e;
+}
+
+// 24x24 line icons (stroke = currentColor), so buttons are told apart by symbol, not by colour.
+const ICON = {
+    plate: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 15l5-5 4 4 3-3 6 6"/>',
+    find: '<circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/>',
+    preview: '<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/>',
+    run: '<path d="M7 4.5v15l12-7.5z"/>',
+    clear: '<path d="M6 6l12 12M18 6L6 18"/>',
+    reload: '<path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/>',
+    tune: '<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>',
+};
+
+const SAM3_MISSING = "Needs the ComfyUI-SAM3 node pack: open the Manager > Custom Nodes Manager, search SAM3, install " +
+    "ComfyUI-SAM3, then restart ComfyUI.";
+/** True when the SAM3 nodes are not installed (picking and detecting need them). */
+const noSam3 = () => !LiteGraph.registered_node_types?.LoadSAM3Model;
+
+/** Button with an icon and a label span (change b.label.textContent, not b.textContent, to keep the icon). */
+function btn(cls, icon, text) {
+    const b = el("button", `sm-btn ${cls}`.trim());
+    b.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON[icon]}</svg>`;
+    b.label = el("span", null, text);
+    b.append(b.label);
+    return b;
 }
 
 const viewUrl = (f) => api.apiURL(`/view?filename=${encodeURIComponent(f.filename)}&subfolder=${encodeURIComponent(f.subfolder)}&type=${f.type}&r=${Math.random()}`);
@@ -209,14 +272,14 @@ function coverage(a, b) {
 /** Collapsible "About" section at the bottom of the node: what it does, who made it, the license. */
 function aboutPanel() {
     const link = (href, text) => {
-        const a = el("a", null, text);
+        const a = el("a", "sm-btn", text);
         a.href = href; a.target = "_blank"; a.rel = "noopener";
         return a;
     };
-    const line = (...parts) => {
-        const d = el("div");
-        d.append(...parts.map((p) => (typeof p === "string" ? document.createTextNode(p) : p)));
-        return d;
+    const para = (...parts) => {
+        const p = el("p");
+        p.append(...parts.map((x) => (typeof x === "string" ? document.createTextNode(x) : x)));
+        return p;
     };
     const details = el("details", "sm-about");
     const sum = el("summary");
@@ -225,16 +288,26 @@ function aboutPanel() {
         if (i) motif.append(el("s"));
         const d = el("i"); d.style.background = c; motif.append(d);
     });
-    sum.append(motif, el("span", null, "// About · Comfy Compositing"));
+    const id = el("div", "sm-id");
+    const name = el("div", "sm-name", TITLE);
+    name.append(el("span", "sm-ver", `v${VERSION}`));
+    id.append(name);
+    sum.append(motif, id, el("span", "sm-more", "About"));
     details.append(sum);
     const body = el("div", "sm-about-body");
+    const links = el("div", "sm-about-links");
+    links.append(
+        link("https://comfycompositing.com", "comfycompositing.com"),
+        link("https://comfycompositing.com/contact", "Commercial license"),
+        link("https://github.com/rik-python/ComfyUI-Comfy-Pro-Alpha-Generator", "Docs and updates"),
+    );
+    const by = el("p", "sm-by");
+    by.append("Created by ", el("b", null, "Rikin Patel"), " at Comfy Compositing.");
     body.append(
-        (() => { const n = el("div", "sm-name"); n.append("Comfy Pro ", el("em", null, "Alpha Generator"), el("span", "sm-chip", `v${VERSION}`)); n.lastChild.style.marginLeft = "8px"; return n; })(),
-        line("Mattes one chosen subject with generative edge quality: SAM3 picks it, LTX-2.5 alpha-gen draws the edge."),
-        line("Created by ", el("b", null, "Rikin Patel"), " at ", link("https://comfycompositing.com", "Comfy Compositing"), "."),
-        line("Free for personal and non-commercial use (PolyForm Noncommercial 1.0.0). Commercial use needs a license: ",
-             link("https://comfycompositing.com/contact", "comfycompositing.com/contact"), "."),
-        line(link("https://github.com/rik-python/ComfyUI-Comfy-Pro-Alpha-Generator", "Docs and updates on GitHub")),
+        by,
+        para("Mattes one chosen subject with generative edge quality. SAM3 picks the subject, LTX-2.5 alpha-gen draws the edge."),
+        para("Free for personal and non-commercial use (PolyForm Noncommercial 1.0.0). Commercial use needs a license from Comfy Compositing."),
+        links,
     );
     details.append(body);
     for (const ev of ["pointerdown", "mousedown"]) details.addEventListener(ev, (e) => e.stopPropagation());  // not a canvas drag
@@ -274,17 +347,39 @@ class Picker {
         injectCss();
         const root = el("div", "sm-root");
 
-        const bar = el("div", "sm-bar");
-        this.tabs = el("div", "sm-tabs");
+        // Guided layout: a first-time user sees only the next action. Step tracker on top (Plate > Subject > Render),
+        // the viewer explains the current step (big Load plate button when empty, "click the subject" after), and
+        // one action bar at the bottom. Pick/Result and the search box appear only when they make sense (syncUI).
+        this.steps = {};
+        const stepper = el("div", "sm-stepper");
+        [["plate", "Plate"], ["subject", "Subject"], ["render", "Render"]].forEach(([k, label], i) => {
+            if (i) stepper.append(el("i", "sm-st-line"));
+            const s = el("div", "sm-st");
+            s.append(el("span", "sm-st-dot", String(i + 1)), el("span", null, label));
+            this.steps[k] = s;
+            stepper.append(s);
+        });
+        this.reloadBtn = btn("quiet icon", "reload", "");
+        this.reloadBtn.title = "Load the plate again (after changing the clip, crop or resize upstream)";
+        this.reloadBtn.onclick = () => this.loadPlate();
+        this.advBtn = btn("quiet", "tune", "Advanced");
+        this.advBtn.onclick = () => this.toggleAdvanced();
+        stepper.append(el("span", "sm-sp"), this.reloadBtn, this.advBtn);
+
+        this.tabs = el("div", "sm-seg sm-ov-tl");
         for (const [k, label] of [["pick", "Pick"], ["result", "Result"]]) {
-            const t = el("div", "sm-tab", label);
+            const t = el("button", null, label);
             t.onclick = () => { this.tab = k; this.seek(this.frame); };
             t.dataset.k = k;
             this.tabs.appendChild(t);
         }
-        this.loadBtn = el("button", "sm-btn blue", "Load plate");
-        this.loadBtn.title = "Run the nodes feeding 'images' and show the plate here (again after changing crop/resize)";
+        this.loadBtn = btn("primary big", "plate", "Load plate");
+        this.loadBtn.title = "Run the nodes feeding 'images' and show the plate here";
         this.loadBtn.onclick = () => this.loadPlate();
+        this.emptyCard = el("div", "sm-empty");
+        this.emptyTitle = el("div", "sm-empty-title", "Step 1: show the plate");
+        this.emptyText = el("div", "sm-empty-text");
+        this.emptyCard.append(this.emptyTitle, this.loadBtn, this.emptyText);
         this.promptBox = el("input", "sm-input");
         this.promptBox.placeholder = "person, dog, bike…";
         this.promptBox.title = "What to detect. Comma-separate several (e.g. 'dog, person' to also exclude people)";
@@ -293,47 +388,54 @@ class Picker {
         for (const ev of ["keydown", "keyup", "keypress"]) this.promptBox.addEventListener(ev, (e) => e.stopPropagation());
         this.promptBox.addEventListener("keydown", (e) => { if (e.key === "Enter") this.detect(); });
         this.promptBox.addEventListener("change", () => { this.picks.prompt = this.promptText(); this.writePicks(); });
-        this.detectBtn = el("button", "sm-btn purple fill", "Detect");
+        this.detectBtn = btn("", "find", "Find");
+        this.detectBtn.title = "Detect every match on this frame, then click the one you want";
         this.detectBtn.onclick = () => this.detect();
-        const clear = el("button", "sm-btn ghost", "Clear picks");
-        clear.onclick = () => {
+        this.findEl = el("div", "sm-find sm-ov-tr");
+        this.findEl.append(this.promptBox, this.detectBtn);
+
+        this.clearBtn = btn("quiet", "clear", "Clear picks");
+        this.clearBtn.onclick = () => {
             this.picks = { cuts: [], adds: [], others: [], detect: this.picks.detect, prompt: this.picks.prompt };
             this.writePicks(); this.render();
         };
-        this.previewBtn = el("button", "sm-btn amber", "Preview chunk");
-        this.previewBtn.title = "Render the first 49 frames from the pick frame";
+        this.previewBtn = btn("", "preview", "Preview 49 frames");
+        this.previewBtn.title = "Matte 49 frames from the pick frame (a few minutes) to check the edges first";
         this.previewBtn.onclick = () => this.queue(true);
-        const run = el("button", "sm-btn amber fill", "Run full shot");
-        run.onclick = () => this.queue(false);
-        this.advBtn = el("button", "sm-btn ghost", "⚙ Advanced");
-        this.advBtn.onclick = () => this.toggleAdvanced();
-        bar.append(this.tabs, this.loadBtn, this.promptBox, this.detectBtn, clear, this.previewBtn, run, this.advBtn);
+        this.runBtn = btn("", "run", "Render full shot");
+        this.runBtn.title = "Matte every frame from the pick frame to the end and save the files";
+        this.runBtn.onclick = () => this.queue(false);
+        this.actions = el("div", "sm-actions");
+        this.actions.append(this.clearBtn, el("span", "sm-sp"), this.runBtn, this.previewBtn);
 
         const view = el("div", "sm-view");
         this.canvas = el("canvas");
         this.hint = el("div", "sm-hint");
-        view.append(this.canvas, this.hint);
+        view.append(this.canvas, this.hint, this.tabs, this.findEl, this.emptyCard);
         this.canvas.addEventListener("pointerdown", (e) => this.onPointer(e));
         this.canvas.addEventListener("pointermove", (e) => { if (e.buttons && this.tab === "result") this.onPointer(e); });
         this.canvas.addEventListener("contextmenu", (e) => e.preventDefault());
         new ResizeObserver(() => this.render()).observe(view);
 
-        const scrub = el("div", "sm-scrub");
+        this.scrub = el("div", "sm-scrub");
         this.slider = el("input");
         this.slider.type = "range"; this.slider.min = 0; this.slider.value = 0;
         this.slider.oninput = () => this.seek(+this.slider.value);
         this.frameLabel = el("span", null, "frame 1");
-        scrub.append(this.slider, this.frameLabel);
+        this.scrub.append(this.slider, this.frameLabel);
 
         this.status = el("div", "sm-bar");
         this.qc = el("div", "sm-qc");
-        root.append(bar, view, scrub, this.status, this.qc, aboutPanel());
+        root.append(stepper, view, this.scrub, this.status, this.qc, this.actions, aboutPanel());
 
         // Min height only, no max: the frontend gives the panel all spare node height, so it grows/shrinks when the
         // node is resized. (Never derive the height from node.size ourselves: the node grows to fit -> feedback loop.)
         this.widget = this.node.addDOMWidget("pro_alpha_ui", "sm-ui", root, {
             serialize: false, hideOnZoom: false, getMinHeight: () => 420,
         });
+        // The frontend's side panel (Parameters / app mode) draws a copy of each widget and writes ITS width into
+        // widget.width; the canvas then sizes our panel to that (~265 px) instead of the node. Always use node width.
+        Object.defineProperty(this.widget, "width", { configurable: true, get: () => undefined, set: () => {} });
 
         HIDDEN.forEach((n) => hideWidget(this.w[n]));
         ADVANCED.forEach((n) => hideWidget(this.w[n]));
@@ -372,7 +474,7 @@ class Picker {
 
     async loadPlate() {
         this.loadBtn.disabled = true;
-        this.loadBtn.textContent = "Loading…";
+        this.loadBtn.label.textContent = "Loading…";
         try {
             const info = await this.helper((images, firstFrame) => ({
                 pp: { class_type: "ComfyProAlpha_PlateProxy", inputs: { images, width: 960, first_frame: firstFrame } },
@@ -394,7 +496,7 @@ class Picker {
             alert(`${TITLE}: could not load the plate\n${e.message}`);
         } finally {
             this.loadBtn.disabled = false;
-            this.loadBtn.textContent = "Load plate";
+            this.loadBtn.label.textContent = "Load plate";
         }
     }
 
@@ -408,7 +510,7 @@ class Picker {
     toggleAdvanced() {
         const show = !!this.w[ADVANCED[0]].sm_hidden;
         ADVANCED.forEach((n) => (show ? showWidget : hideWidget)(this.w[n]));
-        this.advBtn.textContent = show ? "⚙ Hide advanced" : "⚙ Advanced";
+        this.advBtn.label.textContent = show ? "Hide advanced" : "Advanced";
         this.fitNode();
     }
 
@@ -430,16 +532,42 @@ class Picker {
                   + "but edges can be softer. Resize upstream for best quality; for 4K, matte a 1080p proxy.";
             kids.push(c);
         }
-        this.status.replaceChildren(
-            ...kids,
-            chip(TARGET, !p.target ? "no target"
-                : p.target.box ? `target #${p.target.id + 1} (frame ${this.num(p.target.frame)})`
-                : `target: clicked object (frame ${this.num(p.target.frame)})`),
-            chip(COLORS[0], `excluded ${p.others.length}`),
-            chip(CUT, `cuts ${p.cuts.length}`),
-            chip(ADD, `adds ${p.adds.length}`),
-        );
+        if (p.target) kids.unshift(chip(TARGET, p.target.box ? `target #${p.target.id + 1} (frame ${this.num(p.target.frame)})`
+            : `target: clicked object (frame ${this.num(p.target.frame)})`));
+        if (p.others.length) kids.push(chip(COLORS[0], `excluded ${p.others.length}`));
+        if (p.cuts.length) kids.push(chip(CUT, `cuts ${p.cuts.length}`));
+        if (p.adds.length) kids.push(chip(ADD, `adds ${p.adds.length}`));
+        this.status.replaceChildren(...kids);
+        this.syncUI();
+    }
+
+    /** Show only what the current step needs (first-time users see one next action, never the whole toolbar). */
+    syncUI() {
+        const plate = !!(this.info && this.img), subject = !!this.picks.target, result = !!this.result;
+        const now = !plate ? "plate" : !subject ? "subject" : "render";
+        for (const [k, s] of Object.entries(this.steps)) {
+            const done = k === "plate" ? plate : k === "subject" ? subject : result;
+            s.classList.toggle("done", done && k !== now);
+            s.classList.toggle("now", k === now);
+        }
+        const linked = this.node.inputs?.find((i) => i.name === "images")?.link != null;
+        this.emptyCard.hidden = plate || this.tab === "result";
+        this.emptyText.textContent = linked
+            ? "Runs the nodes feeding 'images' and shows the plate here."
+            : "First connect a video to the 'images' input (Load Video, or Load Plate Sequence for EXRs).";
+        this.hint.hidden = !this.emptyCard.hidden;
+        this.findEl.hidden = !plate || this.tab !== "pick";
+        this.tabs.hidden = !result;
         for (const t of this.tabs.children) t.classList.toggle("on", t.dataset.k === this.tab);
+        this.reloadBtn.hidden = !this.info;
+        this.scrub.hidden = this.status.hidden = !this.info;
+        this.actions.hidden = !plate;
+        this.clearBtn.hidden = !subject && !this.picks.cuts.length && !this.picks.adds.length;
+        this.previewBtn.disabled = this.runBtn.disabled = !subject;
+        // Preview first; once a preview has rendered, the full shot becomes the main action.
+        const previewed = result && /_preview$/.test(this.result.info.out_dir || "");
+        this.previewBtn.classList.toggle("primary", !previewed);
+        this.runBtn.classList.toggle("primary", previewed);
     }
 
     // ------------------------------------------------------------ data
@@ -526,8 +654,9 @@ class Picker {
 
     /** quiet: auto-detect on a click (no alert when nothing is found). */
     async detect(quiet = false) {
+        if (noSam3()) { alert(`${TITLE}: ${SAM3_MISSING}`); return; }
         this.detectBtn.disabled = true;
-        this.detectBtn.textContent = "Detecting…";
+        this.detectBtn.label.textContent = "Finding…";
         try {
             if (!this.info) await this.loadPlate();
             if (!this.info) return;
@@ -549,7 +678,7 @@ class Picker {
             alert(`${TITLE}: detection failed\n${e.message}`);
         } finally {
             this.detectBtn.disabled = false;
-            this.detectBtn.textContent = "Detect";
+            this.detectBtn.label.textContent = "Find";
         }
     }
 
@@ -575,6 +704,7 @@ class Picker {
 
     /** SAM3 point segmentation of one click on one frame (single-frame mask preview). Resolves {mask}. */
     segmentPoint(frame, x, y, neg, token) {
+        if (noSam3()) return Promise.reject(new Error(SAM3_MISSING));
         const n = {
             f: { class_type: "ComfyProAlpha_Frame", inputs: { images: null, index: frame } },
             m: { class_type: "LoadSAM3Model", inputs: { precision: "auto" } },
@@ -636,7 +766,7 @@ class Picker {
     }
 
     async queue(preview) {
-        if (!this.picks.target) { alert(`${TITLE}: click the subject to matte (anything in the plate, or a detection after Detect).`); return; }
+        if (!this.picks.target) { alert(`${TITLE}: click the subject to matte (anything in the plate, or a match after Find).`); return; }
         if (this.picks.stale && !confirm("The plate changed after you picked the subject. Run anyway?")) return;
         const r = this.w.render;
         r.value = preview ? "preview chunk" : "full shot";
@@ -742,6 +872,7 @@ class Picker {
             this.picks.others = this.picks.others.filter((o) => !inside.has(o.id));
         } catch (e) {
             console.warn("[ComfyProAlpha] target preview failed", e);
+            if (noSam3()) alert(`${TITLE}: ${SAM3_MISSING}`);
         }
         this.writePicks();
         this.render();
@@ -767,7 +898,6 @@ class Picker {
         g.setTransform(dpr, 0, 0, dpr, 0, 0);
         g.clearRect(0, 0, c.clientWidth, c.clientHeight);
         this.updateStatus();
-        this.previewBtn.disabled = !this.picks.target;
         if (this.tab === "result") return this.renderResult(g);
         const r = this.imageRect();
         if (this.img) g.drawImage(this.img, r.x, r.y, r.w, r.h);
@@ -828,19 +958,19 @@ class Picker {
         const warn = [...this.picks.cuts, ...this.picks.adds].find((p) => p.warning);
         this.hint.style.background = warn || this.picks.stale ? "#5a1a2ae6" : "";
         this.hint.textContent = warn ? `⚠ ${warn.warning}`
-            : this.picks.stale ? "⚠ The plate changed (crop/resize/new clip) after picking: Detect again."
+            : this.picks.stale ? "⚠ The plate changed (crop/resize/new clip) after picking: Load plate, then pick again."
             : !this.info ? "Connect the plate to 'images', then click Load plate."
-            : !this.picks.target && !d ? "Click anything to matte it, or type what to find (person, dog, car…) and click Detect."
-            : !this.picks.target ? `Detections live on frame ${this.num(d.frame)}. Click a subject there, or click anything on this frame.`
+            : !this.picks.target && !d ? "Step 2: click the subject you want to matte. Hard to click? Type it in Find (top right)."
+            : !this.picks.target ? `Detections live on frame ${this.num(d.frame)}. Click the one you want there, or click anything on this frame.`
             : !onDetect && this.picks.target.frame !== this.frame ? "Cuts/adds can go on any frame (place them where the part first appears)."
             : !this.picks.target ? "Click a detection, or anything else, to matte it. Other detections are excluded."
-            : "Shift-click: add more (the glass, the table).  Alt-click: cut a part.  Ctrl-click: remove.";
+            : "Fix the pick: Alt-click cuts a part, Shift-click adds one (the glass, the table), Ctrl-click removes. Then Preview.";
     }
 
     renderResult(g) {
         const res = this.result;
         const r = this.imageRect();
-        if (!res || !res.previews.length) { this.hint.textContent = "Run Preview chunk or the full shot to see the result here."; return; }
+        if (!res || !res.previews.length) { this.hint.textContent = "Run Preview 49 frames or Render full shot to see the result here."; return; }
         const items = res.previews;
         const first = res.info.first_frame - (this.info?.first_frame ?? 1);
         // nearest preview to the scrubber frame (first is the processed range's index offset)
@@ -870,13 +1000,13 @@ class Picker {
             ? `${range} · ${q.mode} · frame ${q.first_frame + it.frame} · drag to wipe plate | ${key}` +
               (q.out_dir ? ` · saved: ${q.out_dir}` : "")
             : `Frame ${this.num(this.frame)} is outside this render (${range}). Showing the nearest rendered frame.` +
-              (kind === "preview" ? " Run full shot to render the rest." : "");
+              (kind === "preview" ? " Render full shot to do the rest." : "");
     }
 
     showResult(output) {
         const info = output?.pro_alpha?.[0];
         if (!info) return;
-        this.result = { info, previews: output.previews || [], view: this.result?.view || "comp" };
+        this.result = { info, previews: output.previews || [], view: this.result?.view || "alpha" };
         this.tab = "result";
         const badge = (label, value, cls) => el("span", `sm-badge ${cls}`, `${label} ${value}`);
         const kids = [];
@@ -901,8 +1031,12 @@ class Picker {
                     + "so those frames use the ViTMatte edge instead.";
             kids.push(b);
         }
-        const tog = el("button", "sm-btn ghost", "comp / alpha");
-        tog.onclick = () => { this.result.view = this.result.view === "alpha" ? "comp" : "alpha"; this.render(); };
+        const tog = btn("quiet", "preview", this.result.view === "alpha" ? "Show comp" : "Show alpha");
+        tog.onclick = () => {
+            this.result.view = this.result.view === "alpha" ? "comp" : "alpha";
+            tog.label.textContent = this.result.view === "alpha" ? "Show comp" : "Show alpha";
+            this.render();
+        };
         kids.push(tog);
         this.qc.replaceChildren(...kids);
         this.seek(info.first_frame - (this.info?.first_frame ?? 1));
@@ -945,6 +1079,12 @@ app.registerExtension({
         nodeType.prototype.onNodeCreated = function () {
             const r = created?.apply(this, arguments);
             this.smPicker = new Picker(this);
+            return r;
+        };
+        const connections = nodeType.prototype.onConnectionsChange;
+        nodeType.prototype.onConnectionsChange = function () {
+            const r = connections?.apply(this, arguments);
+            this.smPicker?.syncUI();  // the empty viewer says "connect a video" until 'images' is linked
             return r;
         };
         const configured = nodeType.prototype.onConfigure;
