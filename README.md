@@ -199,6 +199,15 @@ subjects, SAM3 threshold and `fast_attention`. Hover any model selector for the 
 
 ## Hardware
 
+**Which setup do I need?** Same example workflow for everyone; only these change:
+
+| Your machine | What to do |
+|---|---|
+| 24 GB+ VRAM, 64 GB+ RAM | Nothing. Use the defaults. |
+| 12 to 24 GB VRAM | Nothing. ComfyUI streams the model to the GPU (tested with 12 GB free, about 5% slower on the same card). |
+| 16 to 48 GB RAM | Keep the models on an **NVMe SSD** (ComfyUI then streams them from disk by itself), or add `--fast-disk` to ComfyUI's launch arguments. Split very long shots. |
+| Short on disk space | Optional: pick `LTX-2.5-Distilled-Q4_K_M.gguf` (15 GB) in `LTX-2.5 model`. Needs [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF); uses more RAM and is about 30% slower. |
+
 <p align="center"><img src="docs/images/memory.png" width="760" alt="peak RAM"></p>
 
 **12 GB+ VRAM, 16 GB+ RAM.** ComfyUI 0.38+ streams the 22B LTX weights to the GPU as needed (dynamic VRAM), so small
@@ -234,16 +243,76 @@ git clone https://github.com/rik-python/Comfy-Pro-Alpha-Generator.git
 - [ComfyUI-SAM3](https://github.com/PozzettiAndrea/ComfyUI-SAM3)
 - [ComfyUI-LTXVideo](https://github.com/Lightricks/ComfyUI-LTXVideo)
 
-**3. Models.** The Lightricks repos are gated: run `hf auth login` once.
+**3. Get access to the LTX models.** The two Lightricks repos are gated:
+1. Make a free [Hugging Face](https://huggingface.co) account.
+2. Open [Lightricks/LTX-2.5](https://huggingface.co/Lightricks/LTX-2.5) and
+   [Lightricks/LTX-2.5-22b-IC-LoRA-Alpha-Gen](https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Alpha-Gen),
+   and accept the terms on each page.
+3. Download in the browser while logged in, or log in once for the command line: `hf auth login`.
+   (The Lightricks file links below show an access error until you are logged in and have accepted the terms.)
 
-| File | Folder |
-|---|---|
-| `ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors` | `models/diffusion_models` |
-| `ltx-2.5-22b-ic-lora-alpha-gen-0.9.safetensors` ([Lightricks/LTX-2.5-22b-IC-LoRA-Alpha-Gen](https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Alpha-Gen)) | `models/loras` |
-| `ltx-2.5-video-vae-conv-bf16.safetensors` (**conv** VAE; the diffusion VAE can't encode guides) | `models/vae` |
-| `ltx-2.5-audio-vae-bf16.safetensors` | `models/vae` |
-| ViTMatte `hustvl/vitmatte-base-composition-1k` (auto-downloads on first run) | `models/vitmatte/` |
-| `gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors` (*optional*: the built-in empty prompt replaces it) | `models/text_encoders` |
+**4. Download the models.**
+
+| # | File | Size | Download | Put it in |
+|:-:|---|--:|---|---|
+| 1 | `ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors` | 21.5 GB | [Lightricks/LTX-2.5](https://huggingface.co/Lightricks/LTX-2.5/blob/main/diffusion_models/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors) | `models/diffusion_models/` |
+| 2 | `ltx-2.5-22b-ic-lora-alpha-gen-0.9.safetensors` | 1.3 GB | [Lightricks/LTX-2.5-22b-IC-LoRA-Alpha-Gen](https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Alpha-Gen/blob/main/ltx-2.5-22b-ic-lora-alpha-gen-0.9.safetensors) | `models/loras/` |
+| 3 | `ltx-2.5-video-vae-conv-bf16.safetensors` | 1.5 GB | [Lightricks/LTX-2.5](https://huggingface.co/Lightricks/LTX-2.5/blob/main/vae/ltx-2.5-video-vae-conv-bf16.safetensors) | `models/vae/` |
+| 4 | `ltx-2.5-audio-vae-bf16.safetensors` | 0.4 GB | [Lightricks/LTX-2.5](https://huggingface.co/Lightricks/LTX-2.5/blob/main/vae/ltx-2.5-audio-vae-bf16.safetensors) | `models/vae/` |
+| 5 | `sam3.safetensors` | 3.5 GB | **automatic** on first run ([apozz/sam3-safetensors](https://huggingface.co/apozz/sam3-safetensors)) | `models/sam3/` |
+| 6 | ViTMatte `vitmatte-base-composition-1k` | 0.4 GB | **automatic** on first run ([hustvl/vitmatte-base-composition-1k](https://huggingface.co/hustvl/vitmatte-base-composition-1k)) | `models/vitmatte/vitmatte-base-composition-1k/` |
+
+> **Use the conv video VAE (#3)**, `...-video-vae-conv-bf16`, not `...-video-vae-bf16`: only the conv VAE can encode
+> the plate that guides alpha-gen. **No text encoder needed**: the pack ships the empty-prompt conditioning, so
+> `text encoder` stays on *built-in*.
+
+<details>
+<summary><b>Optional files</b></summary>
+
+| File | Size | Download | Put it in | When |
+|---|--:|---|---|---|
+| `LTX-2.5-Distilled-Q4_K_M.gguf` | 15.1 GB | [realrebelai/LTX-2.5_GGUFs](https://huggingface.co/realrebelai/LTX-2.5_GGUFs/blob/main/LTX-2.5-Distilled-Q4_K_M.gguf) | `models/diffusion_models/` | Short on disk space (needs [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF)) |
+| `gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors` | 15.4 GB | [Lightricks/LTX-2.5](https://huggingface.co/Lightricks/LTX-2.5/blob/main/text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors) | `models/text_encoders/` | Never required (built-in prompt gives the same result) |
+
+</details>
+
+**Folder structure** when done:
+
+```
+ComfyUI/
+├── custom_nodes/
+│   ├── Comfy-Pro-Alpha-Generator/        <- this repo
+│   ├── ComfyUI-SAM3/
+│   └── ComfyUI-LTXVideo/
+└── models/
+    ├── diffusion_models/
+    │   └── ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors
+    ├── loras/
+    │   └── ltx-2.5-22b-ic-lora-alpha-gen-0.9.safetensors
+    ├── vae/
+    │   ├── ltx-2.5-video-vae-conv-bf16.safetensors
+    │   └── ltx-2.5-audio-vae-bf16.safetensors
+    ├── sam3/
+    │   └── sam3.safetensors                 (downloads itself)
+    └── vitmatte/
+        └── vitmatte-base-composition-1k/    (downloads itself)
+```
+
+<details>
+<summary><b>Download everything from the command line</b></summary>
+
+Run inside `ComfyUI/models` after `hf auth login`. `--local-dir` keeps the repo's subfolders, so the files land in
+the right folders:
+
+```
+hf download Lightricks/LTX-2.5 diffusion_models/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors vae/ltx-2.5-video-vae-conv-bf16.safetensors vae/ltx-2.5-audio-vae-bf16.safetensors --local-dir .
+hf download Lightricks/LTX-2.5-22b-IC-LoRA-Alpha-Gen ltx-2.5-22b-ic-lora-alpha-gen-0.9.safetensors --local-dir loras
+```
+
+</details>
+
+Models already in a subfolder (`models/diffusion_models/LTX/...`) work too: the node finds them by file name.
+Press **R** in ComfyUI after adding files. **Low-RAM tip:** keep `models/` on an NVMe SSD (see [Hardware](#hardware)).
 
 ## Limits
 
