@@ -33,6 +33,21 @@ def _opt(m):
     return [_np(m)] if m is not None else []
 
 
+def _h(t):
+    """Tensor -> numpy without upcasting (stage outputs are uint8 plates / float16 masks to save RAM)."""
+    return t.detach().cpu().numpy()
+
+
+def _rgb8(plate):
+    """IMAGE (float 0-1, or our uint8 plate) -> uint8 numpy [N,H,W,3]."""
+    a = _h(plate)
+    return a if a.dtype == np.uint8 else (np.clip(a, 0, 1) * 255).round().astype(np.uint8)
+
+
+def _half(a):
+    return torch.from_numpy(np.clip(a, 0, 1).astype(np.float16))
+
+
 # ------------------------------------------------------------------ plate
 
 def plate_fingerprint(images):
@@ -44,7 +59,8 @@ def plate_fingerprint(images):
 
 
 class Plate(io.ComfyNode):
-    """Plate frames [start, start+count) of the connected images."""
+    """Plate frames [start, start+count) of the connected images, stored as uint8 (4x less RAM than float32).
+    Only our own stage nodes read it; ChunkPad hands LTX a float32 chunk."""
 
     @classmethod
     def define_schema(cls):
@@ -54,7 +70,11 @@ class Plate(io.ComfyNode):
 
     @classmethod
     def execute(cls, images, start, count):
-        return io.NodeOutput(images[start:start + count].float().clamp(0, 1))
+        src = images[start:start + count]
+        out = torch.empty(src.shape, dtype=torch.uint8)
+        for i in range(0, src.shape[0], 16):  # in slices: no full float32 temporary
+            out[i:i + 16] = (src[i:i + 16].float().clamp(0, 1) * 255).round().to(torch.uint8)
+        return io.NodeOutput(out)
 
 
 class LoadVideo(io.ComfyNode):
@@ -132,7 +152,7 @@ class TrackMasks(io.ComfyNode):
 
     @classmethod
     def execute(cls, masks, start, count, width, height):
-        out = torch.zeros(count, height, width)
+        out = torch.zeros(count, height, width, dtype=torch.float16)
         for t in range(count):
             m = masks.get(str(start + t))
             if m is None:
@@ -150,7 +170,7 @@ class TrackMasks(io.ComfyNode):
                 m = m[:height, :width]  # proxy mp4 padded odd sizes to even
             if m.shape != (height, width):
                 m = torch.nn.functional.interpolate(m[None, None], size=(height, width), mode="bilinear")[0, 0]
-            out[t] = m.clamp(0, 1)
+            out[t] = m.clamp(0, 1).half()
         return io.NodeOutput(out)
 
 
@@ -228,7 +248,7 @@ class Refine(io.ComfyNode):
     @classmethod
     def execute(cls, plate, target, vitmatte, erode, dilate, radius, adds=None, cuts=None, others=None):
         n = plate.shape[0]
-        rgb = (plate.cpu().numpy() * 255).round().astype(np.uint8)
+        rgb = _rgb8(plate)
         sel, oth = E.build_selection(_np(target), _opt(adds), _opt(cuts), _opt(others))
 
         model, proc = _vitmatte(vitmatte)
@@ -243,8 +263,10 @@ class Refine(io.ComfyNode):
 
         sel, vit, oth = E.stabilize([sel, vit, oth], E.to_gray(rgb), radius=radius,
                                     progress=lambda i, t: pbar.update(1))
-        t = lambda a: torch.from_numpy(np.clip(a, 0, 1))
-        return io.NodeOutput(t(sel), t(vit), t(oth))
+        # selection / others stay float32: they shape the isolated plate, and LTX amplifies even 1-level rounding
+        # there into a different (equally valid) sample. The ViTMatte edge only feeds the final blend: half is exact enough.
+        f32 = lambda a: torch.from_numpy(np.clip(a, 0, 1).astype(np.float32))
+        return io.NodeOutput(f32(sel), _half(vit), f32(oth))
 
 
 # ------------------------------------------------------------------ isolated plate
@@ -255,19 +277,24 @@ class Isolate(io.ComfyNode):
         return _schema("SelectiveMatte_Isolate", [
             io.Image.Input("plate"), io.Mask.Input("selection"), io.Mask.Input("others"),
             io.Int.Input("grow", default=6), io.Float.Input("blur", default=6.0),
+            io.Int.Input("start", default=0, optional=True),
         ], [io.Image.Output("isolated")])
 
     @classmethod
-    def execute(cls, plate, selection, others, grow, blur):
-        rgb = plate.cpu().numpy() * 255.0
-        sel, oth = _np(selection), _np(others)
-        out = np.empty_like(rgb)
-        pbar = comfy.utils.ProgressBar(len(rgb))
-        for f in range(len(rgb)):
-            out[f] = E.isolate_frame(rgb[f], sel[f], oth[f], grow, blur)
+    def execute(cls, plate, selection, others, grow, blur, start=0):
+        # plate = the full-precision upstream frames (from `start`), read one frame at a time: the inpaint fill
+        # depends on the unrounded colours, and LTX turns a 1-level change there into a different sample.
+        sel, oth = _h(selection), _h(others)
+        n = sel.shape[0]
+        out = np.empty((n,) + tuple(plate.shape[1:]), np.uint8)
+        pbar = comfy.utils.ProgressBar(n)
+        for f in range(n):
+            fr = plate[start + f]
+            rgb = fr.cpu().numpy().astype(np.float32) if fr.dtype == torch.uint8 else fr.float().clamp(0, 1).cpu().numpy() * 255.0
+            iso = E.isolate_frame(rgb, E._f32(sel[f]), E._f32(oth[f]), grow, blur)
+            out[f] = np.clip(iso, 0, 255).round().astype(np.uint8)  # 8 bit, like the CLI's mp4 plate
             pbar.update(1)
-        # Round-trip through 8 bit like the CLI's mp4 plate, so LTX sees the same kind of input.
-        return io.NodeOutput(torch.from_numpy(np.clip(out, 0, 255).round() / 255.0).float())
+        return io.NodeOutput(torch.from_numpy(out))
 
 
 # ------------------------------------------------------------------ LTX chunking
@@ -279,11 +306,14 @@ class ChunkPad(io.ComfyNode):
     def define_schema(cls):
         return _schema("SelectiveMatte_ChunkPad", [
             io.Image.Input("images"), io.Int.Input("start", default=0), io.Int.Input("length", default=49),
+            io.Int.Input("end", default=-1),
         ], [io.Image.Output("chunk")])
 
     @classmethod
-    def execute(cls, images, start, length):
-        c = images[start:start + length]
+    def execute(cls, images, start, length, end=-1):
+        stop = start + length if end < 0 else min(start + length, end)  # never past the processed range
+        c = images[start:stop]
+        c = c.float() / 255.0 if c.dtype == torch.uint8 else c.float().clamp(0, 1)
         if c.shape[0] < length:
             c = torch.cat([c, c[-1:].repeat(length - c.shape[0], 1, 1, 1)])
         h, w = c.shape[1:3]
@@ -293,6 +323,23 @@ class ChunkPad(io.ComfyNode):
         return io.NodeOutput(c)
 
 
+class DecodeAlpha(io.ComfyNode):
+    """VAE-decode one LTX chunk (tiled, same settings as before) and keep only its alpha, as float16.
+    Fused so the full-colour float32 decode (about 1.2 GB per 1080p chunk) is never cached or held for Stitch."""
+
+    @classmethod
+    def define_schema(cls):
+        return _schema("SelectiveMatte_DecodeAlpha", [io.Latent.Input("samples"), io.Vae.Input("vae")],
+                       [io.Mask.Output("alpha")])
+
+    @classmethod
+    def execute(cls, samples, vae):
+        import nodes
+
+        img = nodes.VAEDecodeTiled().decode(vae, samples, 512, 64, 64, 8)[0]
+        return io.NodeOutput(img.float().mean(-1).half().cpu())
+
+
 class Stitch(io.ComfyNode):
     """Cross-fade decoded LTX chunks (triangular weights) into one alpha MASK of the processed range."""
     MAX = 24
@@ -300,7 +347,7 @@ class Stitch(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return _schema("SelectiveMatte_Stitch",
-                       [io.String.Input("plan")] + [io.Image.Input(f"chunk_{i}", optional=True) for i in range(cls.MAX)],
+                       [io.String.Input("plan")] + [io.Mask.Input(f"chunk_{i}", optional=True) for i in range(cls.MAX)],
                        [io.Mask.Output("alpha")])
 
     @classmethod
@@ -310,12 +357,14 @@ class Stitch(io.ComfyNode):
         acc = torch.zeros(n, h, w)
         wsum = torch.zeros(n, 1, 1)
         for i, s in enumerate(starts):
-            img = chunks[f"chunk_{i}"][:, :h, :w].float().cpu().mean(-1)
+            img = chunks[f"chunk_{i}"][:, :h, :w].float().cpu()
+            if img.dim() == 4:  # an IMAGE chunk (older graph): average the channels
+                img = img.mean(-1)
             for k in range(min(L, n - s)):
                 wt = E.chunk_weight(i, starts, L, k)
                 acc[s + k] += img[k] * wt
                 wsum[s + k] += wt
-        return io.NodeOutput((acc / wsum).clamp(0, 1))
+        return io.NodeOutput((acc / wsum).clamp(0, 1).half())
 
 
 # ------------------------------------------------------------------ final
@@ -352,7 +401,7 @@ def _previews(plate, alpha, every):
     h, w = alpha.shape[1:]
     size = (min(960, w), int(min(960, w) * h / w))
     for f in range(0, len(alpha), every):
-        rgb = plate[f]
+        rgb = plate[f].astype(np.float32) / 255.0 if plate.dtype == np.uint8 else plate[f]
         a = alpha[f][..., None]
         comp = rgb * a + 0.5 * (1 - a)
         names = []
@@ -373,35 +422,41 @@ class Final(io.ComfyNode):
             io.Int.Input("near_px", default=15), io.String.Input("filename_prefix", default="selective_matte/shot"),
             io.Combo.Input("format", options=["png16", "exr"]), io.Int.Input("first_frame", default=1),
             io.Boolean.Input("save", default=True), io.Boolean.Input("qc", default=True),
+            io.Boolean.Input("comp", default=True),
         ], [io.Mask.Output("alpha"), io.Image.Output("comp")], output_node=True)
 
     @classmethod
     def execute(cls, plate, ltx, selection, refined, others, near_px, filename_prefix, format, first_frame,
-                save, qc, ltx_isolated=None):
-        p = plate.cpu().numpy()
-        L, S, R, O = _np(ltx), _np(selection), _np(refined), _np(others)
-        n = len(p)
-        v7 = np.stack([E.hybrid(L[f], S[f], R[f]) for f in range(n)])
-        if ltx_isolated is not None:
-            I = _np(ltx_isolated)
-            v11 = np.stack([E.level(I[f], S[f], O[f])[0] for f in range(n)])
-            alpha = np.stack([E.v12_blend(v7[f], v11[f], S[f], O[f], near_px) for f in range(n)])
-            mode = "v12 (best)"
-        else:
-            alpha, mode = v7, "v7 (fast)"
+                save, qc, comp=True, ltx_isolated=None):
+        p = _rgb8(plate)
+        L, S, R, O = _h(ltx), _h(selection), _h(refined), _h(others)
+        I = _h(ltx_isolated) if ltx_isolated is not None else None
+        n, f32 = len(p), E._f32
+        alpha = np.empty(L.shape, np.float32)
+        for f in range(n):  # frame by frame: no full-shot v7 / v11 stacks
+            v7 = E.hybrid(f32(L[f]), f32(S[f]), f32(R[f]))
+            alpha[f] = v7 if I is None else E.v12_blend(v7, E.level(f32(I[f]), f32(S[f]), f32(O[f]))[0],
+                                                        f32(S[f]), f32(O[f]), near_px)
+        mode = "v12 (best)" if I is not None else "v7 (fast)"
         # LTX alpha-gen only mattes what it sees as the main subject: a background car or a prop can come out
         # empty. Fall back to the ViTMatte edge wherever LTX does not cover the selection.
-        ltx_seen = np.maximum(L, I) if ltx_isolated is not None else L
-        alpha, cover = E.ltx_fallback(alpha, ltx_seen, S, R)
-        alpha = np.clip(alpha, 0, 1).astype(np.float32)
+        ltx_seen = np.maximum(L, I) if I is not None else L
+        alpha, cover = E.ltx_fallback(alpha, ltx_seen, S, R, out=alpha)
+        np.clip(alpha, 0, 1, out=alpha)
 
         out_dir = _save(alpha, filename_prefix, format, first_frame) if save else ""
         score = E.qc(E.to_gray(p), S, L, alpha) if qc else {}
-        comp = p * alpha[..., None] + 0.5 * (1 - alpha[..., None])
+        if comp:  # only built when the node's comp output is wired (a full 1080p shot is several GB)
+            comp_t = torch.empty(p.shape, dtype=torch.float32)
+            for f in range(n):
+                a = alpha[f][..., None]
+                comp_t[f] = torch.from_numpy(p[f].astype(np.float32) / 255.0 * a + 0.5 * (1 - a))
+        else:
+            comp_t = torch.zeros(1, 64, 64, 3)
         info = {"mode": mode, "frames": n, "first_frame": first_frame, "out_dir": out_dir, "format": format,
                 "ltx_cover": float(np.mean(cover) * 100), **{k: float(v) for k, v in score.items()}}
         ui_out = {"selective_matte": [info], "previews": _previews(p, alpha, max(1, n // 48))}
-        return io.NodeOutput(torch.from_numpy(alpha), torch.from_numpy(comp.astype(np.float32)), ui=ui_out)
+        return io.NodeOutput(torch.from_numpy(alpha), comp_t, ui=ui_out)
 
 
 # ------------------------------------------------------------------ detection report (for the picker UI)
@@ -463,4 +518,4 @@ class PartReport(io.ComfyNode):
                                                           "mask": {"filename": name, "subfolder": sub, "type": "temp"}}]})
 
 
-NODES = [Plate, LoadVideo, Frame, PlateProxy, TrackMasks, MaskMax, EmptyPrompt, Refine, Isolate, ChunkPad, Stitch, Final, DetectReport, PartReport]
+NODES = [Plate, LoadVideo, Frame, PlateProxy, TrackMasks, MaskMax, EmptyPrompt, Refine, Isolate, ChunkPad, DecodeAlpha, Stitch, Final, DetectReport, PartReport]

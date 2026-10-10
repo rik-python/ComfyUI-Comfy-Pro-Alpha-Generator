@@ -30,11 +30,22 @@ RENDER = ["full shot", "preview chunk"]
 SIGMAS = "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
 
 
+def _names(widget):
+    """Model files for a widget. The LTX list also has .gguf files (low RAM/VRAM) when ComfyUI-GGUF is installed."""
+    names = folder_paths.get_filename_list(MODELS[widget][0])
+    if widget == "ltx_model":
+        try:
+            names = names + [n for n in folder_paths.get_filename_list("unet_gguf") if n not in names]
+        except KeyError:  # ComfyUI-GGUF not installed
+            pass
+    return names
+
+
 def _models(widget):
     """Files in the widget's models folder, the recommended one first. Re-read every time the node definitions
     are fetched, so after dropping a model in the folder, pressing R (refresh) in ComfyUI lists it."""
     kind, prefer = MODELS[widget]
-    names = folder_paths.get_filename_list(kind)
+    names = _names(widget)
     best = next((n for n in names if n.replace("\\", "/").split("/")[-1] == prefer), None)
     best = best or next((n for n in names if prefer.rsplit("-", 1)[0] in n), None)
     return ([best] if best else []) + [n for n in names if n != best] or [NONE]
@@ -43,12 +54,25 @@ def _models(widget):
 def _model_input(widget, label):
     kind, prefer = MODELS[widget]
     tip = f"Recommended: {prefer} | folder: ComfyUI/models/{kind}/ (press R after adding files)"
+    if widget == "ltx_model":
+        tip += (" | Low RAM/VRAM: LTX-2.5-Distilled-Q4_K_M.gguf (needs the ComfyUI-GGUF node pack); "
+                "keep models on an NVMe SSD so ComfyUI streams them from disk")
     if widget == "text_encoder":
         # Alpha-gen uses an empty prompt; its conditioning ships with the pack, so the encoder is optional.
         files = [n for n in _models(widget) if n != NONE]
         return io.Combo.Input(widget, options=[BUILTIN] + files, default=BUILTIN, display_name=label, tooltip=(
             f"{BUILTIN}: same result, skips loading the 13 GB encoder. Or pick {prefer} from ComfyUI/models/{kind}/"))
     return io.Combo.Input(widget, options=_models(widget), display_name=label, tooltip=tip)
+
+
+def _resolve(widget, name):
+    """A saved model name that is not in the folder list (another machine keeps it in a subfolder such as
+    'D_drive\\...', or at the top level) resolves to the file with the same name."""
+    names = _names(widget)
+    if name in names:
+        return name
+    base = name.replace("\\", "/").split("/")[-1]
+    return next((n for n in names if n.replace("\\", "/").split("/")[-1] == base), name)
 
 
 def _kitchen_attention():
@@ -146,6 +170,14 @@ class SelectiveMatte(io.ComfyNode):
                 sam3_threshold, fast_attention=True):
         p = json.loads(picks)
         n_video, H, W = images.shape[:3]
+        ltx_model, alpha_lora, video_vae, audio_vae = (_resolve(w, v) for w, v in (
+            ("ltx_model", ltx_model), ("alpha_lora", alpha_lora), ("video_vae", video_vae), ("audio_vae", audio_vae)))
+        if text_encoder != BUILTIN:
+            text_encoder = _resolve("text_encoder", text_encoder)
+        # Build the comp IMAGE only if something is wired to our comp output (a full 1080p shot is several GB).
+        dp, me = cls.hidden.dynprompt, cls.hidden.unique_id
+        comp_wired = any(v == [me, 1] or v == (me, 1)
+                         for nid in dp.all_node_ids() for v in (dp.get_node(nid).get("inputs") or {}).values())
         # Sub-nodes link straight to whatever feeds our `images` input (no copy of the batch).
         src = cls.hidden.dynprompt.get_node(cls.hidden.unique_id)["inputs"]["images"]
         if p.get("plate") and p["plate"] != plate_fingerprint(images):
@@ -210,7 +242,13 @@ class SelectiveMatte(io.ComfyNode):
         sel, refined, others = ref.out(0), ref.out(1), ref.out(2)
 
         # LTX-2.5 alpha-gen stack, settings from kids_ltx_alphagen_1920_49f_API.json
-        unet = g.node("UNETLoader", unet_name=ltx_model, weight_dtype="default")
+        if ltx_model.lower().endswith(".gguf"):
+            import nodes
+            if "UnetLoaderGGUF" not in nodes.NODE_CLASS_MAPPINGS:
+                raise RuntimeError("A .gguf LTX model needs the ComfyUI-GGUF node pack (install it with the Manager).")
+            unet = g.node("UnetLoaderGGUF", unet_name=ltx_model)
+        else:
+            unet = g.node("UNETLoader", unet_name=ltx_model, weight_dtype="default")
         lora = g.node("LTXICLoRALoaderModelOnly", model=unet.out(0), lora_name=alpha_lora, strength_model=1.0)
         model = lora.out(0)
         if fast_attention:
@@ -234,10 +272,12 @@ class SelectiveMatte(io.ComfyNode):
         sigmas = g.node("ManualSigmas", sigmas=SIGMAS)
         plan = json.dumps({"n": count, "h": H, "w": W, "chunk": L, "starts": starts})
 
-        def ltx_pass(images):
+        def ltx_pass(images, offset=0):
+            """offset: index of the processed range's first frame inside `images` (the upstream plate is read
+            directly at full precision; the isolated plate already starts at the range)."""
             chunks = {}
             for i, s in enumerate(starts):
-                img = g.node("SelectiveMatte_ChunkPad", images=images, start=s, length=L)
+                img = g.node("SelectiveMatte_ChunkPad", images=images, start=offset + s, length=L, end=offset + count)
                 guide = g.node("LTXAddVideoICLoRAGuide", positive=cond.out(0), negative=cond.out(1), vae=vae.out(0),
                                latent=latent.out(0), image=img.out(0), frame_idx=0, strength=1.0,
                                latent_downscale_factor=lora.out(1), crop="disabled", use_tiled_encode=False,
@@ -248,17 +288,17 @@ class SelectiveMatte(io.ComfyNode):
                               sigmas=sigmas.out(0), latent_image=av.out(0))
                 sep = g.node("LTXVSeparateAVLatent", av_latent=samp.out(0))
                 crop = g.node("LTXVCropGuides", positive=guide.out(0), negative=guide.out(1), latent=sep.out(0))
-                dec = g.node("VAEDecodeTiled", samples=crop.out(2), vae=vae.out(0), tile_size=512, overlap=64,
-                             temporal_size=64, temporal_overlap=8)
+                dec = g.node("SelectiveMatte_DecodeAlpha", samples=crop.out(2), vae=vae.out(0))
                 chunks[f"chunk_{i}"] = dec.out(0)
             return g.node("SelectiveMatte_Stitch", plan=plan, **chunks).out(0)
 
-        ltx = ltx_pass(plate.out(0))
+        ltx = ltx_pass(src, offset=start)  # full-precision upstream frames, no copy
         final_kw = {}
         if best:
-            iso = g.node("SelectiveMatte_Isolate", plate=plate.out(0), selection=sel, others=others, grow=6, blur=6.0)
+            iso = g.node("SelectiveMatte_Isolate", plate=src, start=start, selection=sel, others=others,
+                         grow=6, blur=6.0)
             final_kw["ltx_isolated"] = ltx_pass(iso.out(0))
         final = g.node("SelectiveMatte_Final", plate=plate.out(0), ltx=ltx, selection=sel, refined=refined,
                        others=others, near_px=near_px, filename_prefix=prefix, format=format,
-                       first_frame=first_frame + start, save=True, qc=True, **final_kw)
+                       first_frame=first_frame + start, save=True, qc=True, comp=comp_wired, **final_kw)
         return io.NodeOutput(final.out(0), final.out(1), expand=g.finalize())

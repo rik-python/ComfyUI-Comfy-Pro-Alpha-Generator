@@ -886,6 +886,22 @@ app.registerExtension({
                 for (const w of this.widgets || []) {
                     if (w.name in named && w.name !== "selective_matte_ui" && w.name !== "upload") w.value = named[w.name];
                 }
+                // Models saved from another machine (e.g. "D_drive\model.safetensors" vs "model.safetensors"):
+                // select the listed file with the same name.
+                for (const w of this.widgets || []) {
+                    const vals = w.options?.values;
+                    if (!Array.isArray(vals) || vals.includes(w.value) || typeof w.value !== "string") continue;
+                    const base = w.value.split(/[\\/]/).pop();
+                    const m = vals.find((v) => typeof v === "string" && v.split(/[\\/]/).pop() === base);
+                    if (m) w.value = m;
+                }
+                // Workflows saved before "stride" became "overlap frames": the positional value of stride (40) lands in
+                // the overlap slot. Convert: overlap = chunk - stride.
+                const ov = this.widgets?.find((w) => w.name === "overlap");
+                if (ov && !("overlap" in named)) {
+                    const chunk = named.chunk ?? 49;
+                    ov.value = "stride" in named ? Math.max(0, chunk - named.stride) : 9;
+                }
             }
             if (this.smPicker) {
                 this.smPicker.picks = this.smPicker.readPicks();

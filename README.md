@@ -104,8 +104,38 @@ git clone https://github.com/rik-python/ComfyUI-SelectiveMatte.git
 | `ltx-2.5-audio-vae-bf16.safetensors` | `models/vae` |
 | ViTMatte `hustvl/vitmatte-base-composition-1k` (auto-downloads on the first run) | `models/vitmatte/` |
 
-**4. Hardware.** You need a 32 GB GPU (RTX 5090 class) and 64 GB+ of system RAM.
+**4. Hardware.** Any Nvidia GPU with **12 GB+ VRAM**, and **16 GB+ of system RAM** with the models on an NVMe SSD.
 It renders 1920x1088 x 49 frames per LTX chunk; longer shots are split into overlapping chunks and cross-faded.
+See [Low VRAM / low RAM](#low-vram--low-ram).
+
+## Low VRAM / low RAM
+
+ComfyUI 0.38+ streams model weights to the GPU as it needs them (dynamic VRAM), so the 22B LTX model runs on small
+GPUs. The catch: the weights then wait in **system RAM** (about 24 GB) unless ComfyUI can also stream them from disk.
+
+**Disk streaming is the low-RAM switch.** ComfyUI turns it on by itself when the model file sits on a fast NVMe SSD.
+On other drives, add `--fast-disk` to ComfyUI's launch arguments. To check: the ComfyUI log prints
+`Model storage policy: fast_disk=True` with the LTX model's path when it is on.
+
+Measured on the dogs preview (49 frames, Best, int8 model, RTX 5090; times are from a fresh start, model loading included):
+
+| Setup | Peak RAM | Time | Matte |
+|---|---|---|---|
+| Model in RAM (no disk streaming) | 40 GB | | reference |
+| Disk streaming | 21 GB | 272 s | identical |
+| Disk streaming, machine squeezed to **16 GB RAM** | fits | 333 s | identical |
+| 12 GB of VRAM free (simulated) | | about 5% slower | identical |
+
+A real 12 GB card is slower than these numbers because it has less compute, not because it runs out of memory.
+
+**Longer shots** need more working memory (the plate and mattes in RAM). Only the 49-frame preview was tested at
+16 GB; on a 16 GB machine, split long shots if a full run runs out of memory.
+
+**GGUF models (optional).** With the [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF) pack installed, `.gguf`
+files show up in the `LTX-2.5 model` list, for example `LTX-2.5-Distilled-Q4_K_M.gguf` (15 GB,
+[realrebelai/LTX-2.5_GGUFs](https://huggingface.co/realrebelai/LTX-2.5_GGUFs)). Use it only to save disk space:
+GGUF can't be streamed from disk, so it needs **more** RAM than int8 with disk streaming (27 GB vs 21 GB), runs about
+30% slower, and its edges differ slightly (edge difference 0.05; they look the same).
 
 ## How it works
 

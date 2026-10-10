@@ -7,6 +7,11 @@ import cv2
 import numpy as np
 
 
+def _f32(a):
+    """One frame as float32 (stage outputs are stored as uint8 / float16 to save RAM; OpenCV wants float32)."""
+    return np.asarray(a, dtype=np.float32)
+
+
 def ellipse(r):
     return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
 
@@ -171,7 +176,7 @@ def v12_blend(v7, v11, sel, others, near_px=15):
     return wgt * v7 + (1 - wgt) * v11
 
 
-def ltx_fallback(alpha, ltx, sel, refined, core_px=10, reach=25.0, lo=0.3, hi=0.7, down=8):
+def ltx_fallback(alpha, ltx, sel, refined, core_px=10, reach=25.0, lo=0.3, hi=0.7, down=8, out=None):
     """Per AREA: how much LTX covers the selection's core around each pixel (blur radius ~reach px). Where LTX
     misses part of the selection (it only mattes what it reads as the main subject: a table, a parked car), blend
     that part toward the ViTMatte matte; parts LTX covers (the person holding the glass) keep LTX edges.
@@ -188,19 +193,20 @@ def ltx_fallback(alpha, ltx, sel, refined, core_px=10, reach=25.0, lo=0.3, hi=0.
         core = core if core.any() else s
         if not core.any():
             continue
-        cover[f] = float(ltx[f][core].mean())
+        lf = _f32(ltx[f])
+        cover[f] = float(lf[core].mean())
         c = cv2.resize(core.astype(np.float32), (sw, sh), interpolation=cv2.INTER_AREA)
-        l = cv2.resize(ltx[f] * core, (sw, sh), interpolation=cv2.INTER_AREA)
+        l = cv2.resize(lf * core, (sw, sh), interpolation=cv2.INTER_AREA)
         num[f] = cv2.GaussianBlur(l, (0, 0), reach / down)
         den[f] = cv2.GaussianBlur(c, (0, 0), reach / down)
     if n > 2:  # smooth over time so the fallback never pops between frames
         pad = lambda a: np.concatenate([a[:1], a, a[-1:]])
         num, den = [(lambda p: (p[:-2] + 2 * p[1:-1] + p[2:]) / 4)(pad(a)) for a in (num, den)]
-    out = np.empty_like(alpha)
+    out = np.empty_like(alpha) if out is None else out
     for f in range(n):
         local = np.where(den[f] > 1e-3, num[f] / np.maximum(den[f], 1e-3), 1.0)
-        wgt = cv2.resize(np.clip((local - lo) / (hi - lo), 0, 1), (w, h), interpolation=cv2.INTER_LINEAR)
-        out[f] = wgt * alpha[f] + (1 - wgt) * refined[f]
+        wgt = cv2.resize(np.clip((local - lo) / (hi - lo), 0, 1).astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR)
+        out[f] = wgt * _f32(alpha[f]) + (1 - wgt) * _f32(refined[f])
     return out, cover
 
 
@@ -252,17 +258,18 @@ def qc(gray, sel, ltx, alpha, others=None):
         if not m.any():
             continue
         for q, acc in ((ltx, fl_ltx), (alpha, fl_out)):
-            pred = 0.5 * (cv2.remap(q[t - 1], *maps[0], cv2.INTER_LINEAR) + cv2.remap(q[t + 1], *maps[1], cv2.INTER_LINEAR))
-            acc.append(np.abs(q[t] - pred)[m].mean())
+            pred = 0.5 * (cv2.remap(_f32(q[t - 1]), *maps[0], cv2.INTER_LINEAR) + cv2.remap(_f32(q[t + 1]), *maps[1], cv2.INTER_LINEAR))
+            acc.append(np.abs(_f32(q[t]) - pred)[m].mean())
     tot = kept = 0.0
     for f in range(n):
         T = sel[f] > .5
-        O = (ltx[f] > .9) & ~T
+        lf = _f32(ltx[f])
+        O = (lf > .9) & ~T
         dT = cv2.distanceTransform((~T).astype(np.uint8), cv2.DIST_L2, 5)
         dO = cv2.distanceTransform((~O).astype(np.uint8), cv2.DIST_L2, 5)
-        hs = (ltx[f] > .02) & (ltx[f] < .9) & (dT < dO)
-        tot += ltx[f][hs].sum()
-        kept += alpha[f][hs].sum()
+        hs = (lf > .02) & (lf < .9) & (dT < dO)
+        tot += float(lf[hs].sum())
+        kept += float(_f32(alpha[f])[hs].sum())
     base = float(np.mean(fl_ltx)) if fl_ltx else 0.0
     return {"flicker_x": float(np.mean(fl_out)) / base if base else 0.0,
             "hair_pct": float(kept / tot * 100) if tot else 100.0}
