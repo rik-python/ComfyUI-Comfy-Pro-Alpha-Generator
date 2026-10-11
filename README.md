@@ -400,5 +400,17 @@ out, and a QC number I can check before anything goes to comp.
 **Commercial use** (paid client work, studio or company use, or inside a commercial product or service) needs a
 commercial license: [comfycompositing.com/contact](https://comfycompositing.com/contact).
 
-The license covers this node pack's code. The models it runs (LTX-2.5 and its IC-LoRA, SAM3, ViTMatte) and the node
-packs it depends on have their own licenses; follow those as well.
+This license covers this node pack's code only. The models and node packs it runs on have their own licenses, and
+you accept those when you download them from their original pages:
+
+| Component | By | License |
+|---|---|---|
+| LTX-2.5 and the alpha-gen IC-LoRA | Lightricks | [LTX-2.x Community License](https://github.com/Lightricks/LTX-2/blob/main/LICENSE-2_x): companies with $10M+ annual revenue need a paid commercial license from Lightricks |
+| ComfyUI-LTXVideo nodes | Lightricks | [LTX-2 Community License](https://github.com/Lightricks/ComfyUI-LTXVideo/blob/master/LICENSE) |
+| SAM3 | Meta | [SAM License](https://github.com/facebookresearch/sam3/blob/main/LICENSE) |
+| ComfyUI-SAM3 nodes | Andrea Pozzetti | [GPL-3.0](https://github.com/PozzettiAndrea/ComfyUI-SAM3/blob/main/LICENSE) (wrapper code; SAM3 itself stays under the SAM License) |
+| ViTMatte | HUST Vision Lab | [MIT](https://github.com/hustvl/ViTMatte/blob/main/LICENSE) (code), [Apache-2.0](https://huggingface.co/hustvl/vitmatte-base-composition-1k) (weights) |
+| ComfyUI | Comfy Org | [GPL-3.0](https://github.com/comfyanonymous/ComfyUI/blob/master/LICENSE) |
+
+A commercial license for this node pack does **not** include rights to these models. For commercial work, check
+each license above as well, in particular the LTX revenue threshold.
