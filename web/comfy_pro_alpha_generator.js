@@ -13,7 +13,7 @@ import { api } from "../../scripts/api.js";
 const NODE = "ComfyProAlphaGenerator";
 const LEGACY = "SelectiveMatte";  // old node id: workflows saved before the rename
 const TITLE = "Comfy Pro Alpha Generator";
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
 const ADVANCED = ["text_encoder", "chunk", "overlap", "fast_attention",
     "seed", "control_after_generate", "erode", "dilate", "near_px", "stabilize_radius", "sam3_threshold"];
 const HIDDEN = ["picks", "render"];

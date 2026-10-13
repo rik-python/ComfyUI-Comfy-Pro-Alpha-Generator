@@ -500,6 +500,39 @@ hf download Lightricks/LTX-2.5-22b-IC-LoRA-Alpha-Gen ltx-2.5-22b-ic-lora-alpha-g
 Models already in a subfolder (`models/diffusion_models/LTX/...`) work too: the node finds them by file name.
 Press **R** in ComfyUI after adding files. **Low-RAM tip:** keep `models/` on an NVMe SSD (see [Hardware](#hardware)).
 
+### Updating
+
+**With ComfyUI Manager** (easiest, also for packs installed via Git URL):
+1. **Manager** > **Custom Nodes Manager**.
+2. Search `Comfy Pro Alpha`, click **Update** (or use **Update All** on the Manager's main page).
+3. Restart ComfyUI.
+
+**By hand**, from a terminal (ComfyUI's own Python environment active):
+```
+cd ComfyUI/custom_nodes/ComfyUI-Comfy-Pro-Alpha-Generator
+git pull
+pip install -r requirements.txt
+```
+Then restart ComfyUI.
+
+**After either route:**
+- **Reload the browser tab** (Ctrl+R; in Comfy Desktop, reload the window the same way). The node's panel is a web
+  script, and the browser keeps the old one until you reload.
+- **Check the version** on the node: the small tag next to the title (for example `v0.3.0`) should match the
+  [version on GitHub](https://github.com/rik-python/ComfyUI-Comfy-Pro-Alpha-Generator/blob/main/pyproject.toml).
+- **Saved workflows keep their settings.** New settings arrive with their defaults, so an old workflow renders the
+  same as before until you change something.
+- **New models download themselves** the first time a feature needs them (Depth Anything V2 Small for overlap mode).
+
+**If `git pull` refuses** with "your local changes would be overwritten", you edited files in the pack. Keep a copy
+of anything you changed, then run `git stash` and `git pull` again (`git stash pop` brings your edits back, if you
+still want them).
+
+**If the node shows red or "IMPORT FAILED" after an update**, something it depends on is missing or out of date.
+Run the `pip install -r requirements.txt` line above, update
+[ComfyUI-SAM3](https://github.com/PozzettiAndrea/ComfyUI-SAM3), [ComfyUI-LTXVideo](https://github.com/Lightricks/ComfyUI-LTXVideo)
+and ComfyUI itself the same way, then restart. The console line starting with `Cannot import` names the cause.
+
 <sub><code>// 08 · limits</code></sub>
 
 ## What it can and can't do

@@ -1,7 +1,7 @@
 [project]
 name = "comfy-pro-alpha-generator"
 description = "Comfy Pro Alpha Generator: one node. SAM3 picks the subject, LTX-2.5 alpha-gen draws hair-level edges."
-version = "0.2.0"
+version = "0.3.0"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = ["opencv-python-headless", "transformers", "huggingface_hub", "av"]
