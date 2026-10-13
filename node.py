@@ -39,6 +39,7 @@ ALSO_OK = {
 # Node packs the expansion needs: node type -> pack name (checked before running, so the error says what to install).
 PACKS = {"LoadSAM3Model": "ComfyUI-SAM3", "LTXAddVideoICLoRAGuide": "ComfyUI-LTXVideo"}
 QUALITY = ["Best (v12, 2 LTX passes)", "Fast (v7, 1 LTX pass)"]
+V12, V7 = QUALITY
 RENDER = ["full shot", "preview chunk"]
 SIGMAS = "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
 
@@ -182,6 +183,39 @@ class ComfyProAlphaGenerator(io.ComfyNode):
                 io.Boolean.Input("fast_attention", default=True, tooltip=(
                     "Comfy Kitchen int8 attention for LTX: about 36% faster sampling, matte difference ~0.004 "
                     "(7x smaller than changing the seed). Turn off to use standard PyTorch attention.")),
+                io.Boolean.Input("overlap_mode", optional=True, default=False, display_name="handle overlapping people (v13)", tooltip=(
+                    "For people crossing the subject (hands, arms, hair). LTX mattes the subject and everyone else on "
+                    "the real plate (3 LTX passes instead of 2, plus a depth pass) and subtracts the others where SAM3 "
+                    "and depth say they are in front: their fingers and curls come out crisp instead of soft. Replaces "
+                    "the quality setting. If a limb of the subject that rests on someone goes missing, add a click "
+                    "on it. Needs other subjects picked; without them it runs Best (v12).")),
+                io.Boolean.Input("v13_depth", optional=True, default=True, display_name="use depth for front/back (v13)", tooltip=(
+                    "Depth Anything V2 Small decides who is in front where SAM3 gives a pixel to both people or "
+                    "neither (fingers over a chest). Off = SAM3 alone (a local vote): faster, but fast thin fingers "
+                    "in front of the subject can ghost.")),
+                io.Boolean.Input("hair_guide", optional=True, default=False, display_name="sharpen hair over subject (v13)", tooltip=(
+                    "Overlap (v13) only. Where someone's hair crosses the subject, re-fit their hair matte to the "
+                    "plate's own edges (guided filter): more single strands, cleaner gaps between curls. Can read "
+                    "dark stripes or patterns on the subject's clothes as hair, so check the comp. Off by default.")),
+                io.Int.Input("hair_radius", optional=True, default=4, min=1, max=16, display_name="sharpen hair radius (px)", tooltip=(
+                    "How far the hair sharpening looks for plate edges. Smaller = finer strands but noisier; "
+                    "larger = smoother but picks up more clothing pattern.")),
+                io.Int.Input("attn_grow", optional=True, default=20, min=0, max=80, display_name="v13 attention grow (px)", tooltip=(
+                    "How far each SAM3 mask is grown before it steers LTX's attention, so hair outside the SAM "
+                    "outline is still matted. Tested best: 20.")),
+                io.Float.Input("attn_blur", optional=True, default=10.0, min=0.0, max=40.0, step=0.5, display_name="v13 attention feather",
+                               tooltip="Feather of that attention mask. 0 = hard edge (cuts hair, ~1.5x error). Tested best: 10."),
+                io.Float.Input("attn_strength", optional=True, default=1.0, min=0.0, max=1.0, step=0.05, display_name="v13 attention strength",
+                               tooltip="How strongly LTX follows the attention mask. Lower lets it drift to other people. Tested best: 1.0."),
+                io.Int.Input("occluder_reach", optional=True, default=20, min=0, max=60, display_name="v13 occluder reach (px)", tooltip=(
+                    "How far past an in-front person's overlap the subtraction reaches, to catch their soft edge "
+                    "(strands, fast fingertips). Larger can bite the subject's own thin parts. Tested best: 20.")),
+                io.Int.Input("limb_cap", optional=True, default=90, min=20, max=400, display_name="v13 invented-limb cap (px)", tooltip=(
+                    "LTX also draws parts of the subject it cannot see (amodal). Anything further than this from the "
+                    "SAM3 selection is removed (fades over the last 40 px). Raise it if real edges far from the "
+                    "selection get cut. Tested best: 90.")),
+                io.Int.Input("front_smoothing", optional=True, default=3, min=1, max=9, display_name="v13 front/back smoothing (frames)",
+                             tooltip="Frames averaged so the in-front / behind decision never pops. 1 = off. Tested best: 3."),
             ],
             outputs=[io.Mask.Output("alpha"), io.Image.Output("comp")],
             hidden=[io.Hidden.unique_id, io.Hidden.dynprompt],
@@ -209,7 +243,9 @@ class ComfyProAlphaGenerator(io.ComfyNode):
     @classmethod
     def execute(cls, images, fps, first_frame, quality, render, picks, filename_prefix, format, ltx_model, alpha_lora, text_encoder,
                 video_vae, audio_vae, vitmatte, chunk, overlap, seed, erode, dilate, near_px, stabilize_radius,
-                sam3_threshold, fast_attention=True):
+                sam3_threshold, fast_attention=True, overlap_mode=False, hair_guide=False,
+                v13_depth=True, hair_radius=4, attn_grow=20, attn_blur=10.0, attn_strength=1.0, occluder_reach=20,
+                limb_cap=90, front_smoothing=3):
         p = json.loads(picks)
         n_video, H, W = images.shape[:3]
         ltx_model, alpha_lora, video_vae, audio_vae = (_resolve(w, v) for w, v in (
@@ -232,7 +268,7 @@ class ComfyProAlphaGenerator(io.ComfyNode):
         starts = E.chunk_starts(count, L, max(1, L - overlap))
         if len(starts) > 24:
             raise ValueError(f"{count} frames needs {len(starts)} chunks (max 24): lower 'overlap frames' or split the shot")
-        best = quality == QUALITY[0]
+        best = quality == V12
         prefix = filename_prefix + ("_preview" if render == RENDER[1] else "")
 
         g = GraphBuilder()
@@ -314,16 +350,24 @@ class ComfyProAlphaGenerator(io.ComfyNode):
         sigmas = g.node("ManualSigmas", sigmas=SIGMAS)
         plan = json.dumps({"n": count, "h": H, "w": W, "chunk": L, "starts": starts})
 
-        def ltx_pass(images, offset=0):
+        def ltx_pass(images, offset=0, attn=None):
             """offset: index of the processed range's first frame inside `images` (the upstream plate is read
-            directly at full precision; the isolated plate already starts at the range)."""
+            directly at full precision; the isolated plate already starts at the range).
+            attn: a subject MASK over the processed range -> the guide's attention_mask (v13), so LTX mattes that
+            subject on the real plate (plus the parts it hides, which v13 subtracts again where others are in front)."""
             chunks = {}
             for i, s in enumerate(starts):
                 img = g.node("ComfyProAlpha_ChunkPad", images=images, start=offset + s, length=L, end=offset + count)
-                guide = g.node("LTXAddVideoICLoRAGuide", positive=cond.out(0), negative=cond.out(1), vae=vae.out(0),
+                kw = {}
+                if attn is not None:
+                    am = g.node("ComfyProAlpha_AttnChunk", mask=attn, start=s, length=L, end=count, grow=attn_grow,
+                                blur=attn_blur)
+                    kw = {"attention_strength": attn_strength, "attention_mask": am.out(0)}
+                guide = g.node("LTXAddVideoICLoRAGuideAdvanced" if attn is not None else "LTXAddVideoICLoRAGuide",
+                               positive=cond.out(0), negative=cond.out(1), vae=vae.out(0),
                                latent=latent.out(0), image=img.out(0), frame_idx=0, strength=1.0,
                                latent_downscale_factor=lora.out(1), crop="disabled", use_tiled_encode=False,
-                               tile_size=256, tile_overlap=64)
+                               tile_size=256, tile_overlap=64, **kw)
                 av = g.node("LTXVConcatAVLatent", video_latent=guide.out(2), audio_latent=alat.out(0))
                 guider = g.node("CFGGuider", model=model, positive=guide.out(0), negative=guide.out(1), cfg=1.0)
                 samp = g.node("SamplerCustomAdvanced", noise=noise.out(0), guider=guider.out(0), sampler=sampler.out(0),
@@ -336,7 +380,17 @@ class ComfyProAlphaGenerator(io.ComfyNode):
 
         ltx = ltx_pass(src, offset=start)  # full-precision upstream frames, no copy
         final_kw = {}
-        if best:
+        v13 = overlap_mode and bool({"others", "cuts"} & refine_kw.keys())
+        if overlap_mode and not v13:  # nobody else to order against: v12 does it
+            print("[ComfyProAlpha] Overlap (v13): no other subjects picked, using Best (v12)")
+        if v13:  # the target, and everyone else in one pass (fixed cost however many people are excluded)
+            final_kw["attn_target"] = ltx_pass(src, offset=start, attn=sel)
+            final_kw["attn_others"] = ltx_pass(src, offset=start, attn=others)
+            if v13_depth:
+                final_kw["depth"] = g.node("ComfyProAlpha_Depth", plate=plate.out(0)).out(0)
+            final_kw.update(hair_guide=hair_guide, hair_radius=hair_radius, occluder_reach=occluder_reach,
+                            limb_cap=limb_cap, front_smoothing=front_smoothing)
+        elif best or overlap_mode:
             iso = g.node("ComfyProAlpha_Isolate", plate=src, start=start, selection=sel, others=others,
                          grow=6, blur=6.0)
             final_kw["ltx_isolated"] = ltx_pass(iso.out(0))

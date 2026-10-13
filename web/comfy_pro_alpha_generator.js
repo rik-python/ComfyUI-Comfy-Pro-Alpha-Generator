@@ -17,6 +17,8 @@ const VERSION = "0.2.0";
 const ADVANCED = ["text_encoder", "chunk", "overlap", "fast_attention",
     "seed", "control_after_generate", "erode", "dilate", "near_px", "stabilize_radius", "sam3_threshold"];
 const HIDDEN = ["picks", "render"];
+// Overlap (v13) tuning: listed with the other Advanced settings, greyed out while the v13 switch is off
+const V13_ADVANCED = ["attn_grow", "attn_blur", "attn_strength", "occluder_reach", "limb_cap", "front_smoothing"];
 // Comfy Compositing brand (comfycompositing.com), adapted to ComfyUI's dark canvas.
 const BRAND = {
     navy: "#12122a", navy2: "#1a1a36", navy3: "#24244a", line: "#34345e", text: "#ececf6", muted: "#9696b8",
@@ -439,8 +441,31 @@ class Picker {
 
         HIDDEN.forEach((n) => hideWidget(this.w[n]));
         ADVANCED.forEach((n) => hideWidget(this.w[n]));
-        this.fitNode();
+        for (const name of ["overlap_mode", "hair_guide"]) {
+            const w = this.w[name];
+            if (!w) continue;
+            const cb = w.callback;
+            w.callback = (...a) => { const r = cb?.apply(w, a); this.syncQuality(); return r; };
+        }
+        this.syncQuality();
         this.updateStatus();
+    }
+
+    /** Overlap (v13) replaces the quality setting. Every control stays VISIBLE (hidden ones get missed) and is
+     *  greyed out while it has no effect: quality in v13, the v13 options without the switch. */
+    syncQuality() {
+        const v13 = !!this.w.overlap_mode?.value;
+        const advanced = !this.w[ADVANCED[0]]?.sm_hidden;
+        const grey = (w, off) => { if (w) w.disabled = off; };
+        grey(this.w.quality, v13);
+        grey(this.w.v13_depth, !v13);
+        grey(this.w.hair_guide, !v13);
+        grey(this.w.hair_radius, !(v13 && this.w.hair_guide?.value));
+        V13_ADVANCED.forEach((n) => {
+            (advanced ? showWidget : hideWidget)(this.w[n]);
+            grey(this.w[n], !v13);
+        });
+        this.fitNode();
     }
 
     /** Plate frame number of index i (first_frame, e.g. 1001 for VFX plates). */
@@ -511,7 +536,7 @@ class Picker {
         const show = !!this.w[ADVANCED[0]].sm_hidden;
         ADVANCED.forEach((n) => (show ? showWidget : hideWidget)(this.w[n]));
         this.advBtn.label.textContent = show ? "Hide advanced" : "Advanced";
-        this.fitNode();
+        this.syncQuality();
     }
 
     updateStatus() {
@@ -1094,6 +1119,7 @@ app.registerExtension({
             const r = configured?.apply(this, arguments);
             // Restore by NAME when the workflow carries named values: positional widgets_values shift whenever a
             // widget is added/removed in a pack update, which would silently scramble saved settings.
+            queueMicrotask(() => this.smPicker?.syncQuality());  // saved quality is set after the node is built
             const named = info?.widgets_values_named;
             if (named) {
                 for (const w of this.widgets || []) {

@@ -269,6 +269,48 @@ class Refine(io.ComfyNode):
         return io.NodeOutput(f32(sel), _half(vit), f32(oth))
 
 
+# ------------------------------------------------------------------ depth (v13 front/back order)
+
+DEPTH_REPO = "depth-anything/Depth-Anything-V2-Small-hf"  # Apache-2.0 (Base/Large are CC-BY-NC: not usable here)
+
+
+class Depth(io.ComfyNode):
+    """v13: relative depth per frame (bright = near), so the overlap pixels SAM gives to both people go to whoever
+    is in front. Depth Anything V2 Small, downloaded once (~100 MB) to models/depthanything/."""
+
+    @classmethod
+    def define_schema(cls):
+        return _schema("ComfyProAlpha_Depth", [io.Image.Input("plate")], [io.Mask.Output("depth")])
+
+    @classmethod
+    def execute(cls, plate):
+        from transformers import AutoImageProcessor, AutoModelForDepthEstimation
+
+        path = os.path.join(folder_paths.models_dir, "depthanything", DEPTH_REPO.split("/")[1])
+        if not os.path.isfile(os.path.join(path, "config.json")):
+            from huggingface_hub import snapshot_download
+            snapshot_download(DEPTH_REPO, local_dir=path)
+        dev = comfy.model_management.get_torch_device()
+        proc = AutoImageProcessor.from_pretrained(path)
+        model = AutoModelForDepthEstimation.from_pretrained(path).to(dev, torch.float16)
+        model.train(False)  # inference mode
+        rgb = _rgb8(plate)
+        n, h, w = rgb.shape[:3]
+        out = torch.empty(n, h, w, dtype=torch.float16)
+        pbar = comfy.utils.ProgressBar(n)
+        for f in range(n):
+            comfy.model_management.throw_exception_if_processing_interrupted()
+            inp = proc(images=rgb[f], return_tensors="pt").to(dev, torch.float16)
+            with torch.no_grad():
+                d = model(**inp).predicted_depth[:1].float()
+            d = torch.nn.functional.interpolate(d[None], size=(h, w), mode="bicubic")[0, 0].cpu()
+            out[f] = ((d - d.min()) / (d.max() - d.min()).clamp(min=1e-6)).half()
+            pbar.update(1)
+        del model
+        comfy.model_management.soft_empty_cache()
+        return io.NodeOutput(out)
+
+
 # ------------------------------------------------------------------ isolated plate
 
 class Isolate(io.ComfyNode):
@@ -321,6 +363,29 @@ class ChunkPad(io.ComfyNode):
         if ph or pw:
             c = torch.nn.functional.pad(c.permute(0, 3, 1, 2), (0, pw, 0, ph), mode="replicate").permute(0, 2, 3, 1)
         return io.NodeOutput(c)
+
+
+class AttnChunk(io.ComfyNode):
+    """v13: one LTX chunk of a subject mask as the IC-LoRA guide's attention_mask: grown + feathered, then padded
+    like ChunkPad (H/W to a multiple of 32, length to the chunk) so it lines up with the guide frames."""
+
+    @classmethod
+    def define_schema(cls):
+        return _schema("ComfyProAlpha_AttnChunk", [
+            io.Mask.Input("mask"), io.Int.Input("start", default=0), io.Int.Input("length", default=49),
+            io.Int.Input("end", default=-1), io.Int.Input("grow", default=20), io.Float.Input("blur", default=10.0),
+        ], [io.Mask.Output("attention_mask")])
+
+    @classmethod
+    def execute(cls, mask, start, length, end=-1, grow=20, blur=10.0):
+        stop = start + length if end < 0 else min(start + length, end)
+        src = _h(mask[start:stop])
+        out = np.stack([E.attn_mask(m, grow, blur) for m in src])
+        if len(out) < length:
+            out = np.concatenate([out, np.repeat(out[-1:], length - len(out), 0)])
+        h, w = out.shape[1:]
+        out = np.pad(out, ((0, 0), (0, (-h) % 32), (0, (-w) % 32)), mode="edge")
+        return io.NodeOutput(torch.from_numpy(np.clip(out, 0, 1).astype(np.float32)))
 
 
 class DecodeAlpha(io.ComfyNode):
@@ -418,6 +483,10 @@ class Final(io.ComfyNode):
     def define_schema(cls):
         return _schema("ComfyProAlpha_Final", [
             io.Image.Input("plate"), io.Mask.Input("ltx"), io.Mask.Input("ltx_isolated", optional=True),
+            io.Mask.Input("attn_target", optional=True), io.Mask.Input("attn_others", optional=True),
+            io.Mask.Input("depth", optional=True), io.Boolean.Input("hair_guide", default=False, optional=True),
+            io.Int.Input("hair_radius", default=4, optional=True), io.Int.Input("occluder_reach", default=20, optional=True),
+            io.Int.Input("limb_cap", default=90, optional=True), io.Int.Input("front_smoothing", default=3, optional=True),
             io.Mask.Input("selection"), io.Mask.Input("refined"), io.Mask.Input("others"),
             io.Int.Input("near_px", default=15), io.String.Input("filename_prefix", default="comfy_pro_alpha/shot"),
             io.Combo.Input("format", options=["png16", "exr"]), io.Int.Input("first_frame", default=1),
@@ -427,17 +496,25 @@ class Final(io.ComfyNode):
 
     @classmethod
     def execute(cls, plate, ltx, selection, refined, others, near_px, filename_prefix, format, first_frame,
-                save, qc, comp=True, ltx_isolated=None):
+                save, qc, comp=True, ltx_isolated=None, attn_target=None, attn_others=None, depth=None,
+                hair_guide=False, hair_radius=4, occluder_reach=20, limb_cap=90, front_smoothing=3):
         p = _rgb8(plate)
         L, S, R, O = _h(ltx), _h(selection), _h(refined), _h(others)
         I = _h(ltx_isolated) if ltx_isolated is not None else None
         n, f32 = len(p), E._f32
         alpha = np.empty(L.shape, np.float32)
-        for f in range(n):  # frame by frame: no full-shot v7 / v11 stacks
-            v7 = E.hybrid(f32(L[f]), f32(S[f]), f32(R[f]))
-            alpha[f] = v7 if I is None else E.v12_blend(v7, E.level(f32(I[f]), f32(S[f]), f32(O[f]))[0],
-                                                        f32(S[f]), f32(O[f]), near_px)
-        mode = "v12 (best)" if I is not None else "v7 (fast)"
+        if attn_target is not None and attn_others is not None:  # v13: attention passes + front/back order
+            E.v13_overlap(L, _h(attn_target), _h(attn_others), S, O, out=alpha,
+                          depth=None if depth is None else _h(depth), gray=E.to_gray(p) if hair_guide else None,
+                          guide_r=hair_radius, grow=occluder_reach, far=limb_cap, near=max(0, limb_cap - 40),
+                          tsmooth=front_smoothing)
+            mode = "v13 (overlap)"
+        else:
+            for f in range(n):  # frame by frame: no full-shot v7 / v11 stacks
+                v7 = E.hybrid(f32(L[f]), f32(S[f]), f32(R[f]))
+                alpha[f] = v7 if I is None else E.v12_blend(v7, E.level(f32(I[f]), f32(S[f]), f32(O[f]))[0],
+                                                            f32(S[f]), f32(O[f]), near_px)
+            mode = "v12 (best)" if I is not None else "v7 (fast)"
         # LTX alpha-gen only mattes what it sees as the main subject: a background car or a prop can come out
         # empty. Fall back to the ViTMatte edge wherever LTX does not cover the selection.
         ltx_seen = np.maximum(L, I) if I is not None else L
@@ -518,4 +595,4 @@ class PartReport(io.ComfyNode):
                                                           "mask": {"filename": name, "subfolder": sub, "type": "temp"}}]})
 
 
-NODES = [Plate, LoadVideo, Frame, PlateProxy, TrackMasks, MaskMax, EmptyPrompt, Refine, Isolate, ChunkPad, DecodeAlpha, Stitch, Final, DetectReport, PartReport]
+NODES = [Plate, LoadVideo, Frame, PlateProxy, TrackMasks, MaskMax, EmptyPrompt, Refine, Isolate, Depth, ChunkPad, AttnChunk, DecodeAlpha, Stitch, Final, DetectReport, PartReport]

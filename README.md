@@ -50,6 +50,7 @@ Every method gets the same SAM3 selection.
 | ONYX-style: SAM3 + ViTMatte | yes | 45.0% | 31.3% | 1.7x |
 | ONYX-style + temporal stabilizer | yes | 46.1% | 31.8% | **0.5x** |
 | **Comfy Pro Alpha Generator** | **yes** | **88.7%** | **88.7%** | 1.2x |
+| Comfy Pro Alpha Generator, overlap mode (v13) | yes | 90.3% | 88.7% | 1.9x |
 
 The edge matches LTX's generative hair at 88.7%, and only the middle kid is matted. The ViTMatte route gets to
 45%: you get a soft halo around the head, but the strands are gone (compare the zoom at the top). A plain SAM3 mask
@@ -57,6 +58,8 @@ gets 29%.
 
 Against the background, the node flickers about as much as LTX alone (0.0112 vs 0.0109 mean error per pixel). The
 extra 0.2x comes from the few pixels where the kid touches someone else.
+
+Overlap mode (v13) is for people crossing the subject; see [Settings guide](#settings-guide) for what it fixes and why it moves more.
 
 The one row this node doesn't win: a stabilized ViTMatte matte is steadier than LTX itself (0.5x), because it is
 smooth and has no strands left to move. That's the trade. I'll take a little more movement for real hair.
@@ -131,6 +134,11 @@ flowchart LR
 5. On Queue, the node expands into a full ComfyUI graph of SAM3, ViTMatte and LTX stages. Each stage is cached, so
    switching Fast/Best, or running the full shot after a preview, reuses whatever already finished.
 
+**Overlap mode (v13)** handles people crossing the subject, where step 2 can only give a ViTMatte edge. It keeps
+the real plate and steers LTX with each SAM3 mask (the IC-LoRA guide's attention mask): one pass for the subject,
+one for everyone else, then subtracts the others wherever SAM3 and a depth pass say they are in front. Their
+fingers and curls get a generative edge too. Details in the [Settings guide](#settings-guide).
+
 <details>
 <summary><b>Engineering notes</b></summary>
 
@@ -196,10 +204,11 @@ The node walks you through three steps (**Plate → Subject → Render**) and on
 6. **Render full shot.** The alpha is saved to `ComfyUI/output/<filename_prefix>/alpha_00001.png …`,
    16-bit PNG by default or half-float EXR.
 
-| Quality | What it does |
+| Mode | What it does |
 |---|---|
 | **Best (v12)** | 2 LTX passes, the second on the isolated plate. |
 | **Fast (v7)** | 1 LTX pass. About half the time; edges against other subjects are a little weaker. |
+| **handle overlapping people (v13)** | Switch below the models. 3 LTX passes plus depth, for hands, arms and hair crossing the subject. Replaces `quality` while on. |
 
 **QC badges** (after each run)
 
@@ -210,13 +219,147 @@ The node walks you through three steps (**Plate → Subject → Render**) and on
 | LTX cover | How much of the subject LTX matted (the rest uses ViTMatte) | ≥ 90% |
 
 `⚙ Advanced`: frames per chunk, overlap frames, seed, temporal smoothing, trimap erode/dilate, the zone near other
-subjects, SAM3 threshold, `fast_attention` and the optional text encoder. Hover any model selector for the
+subjects, SAM3 threshold, `fast_attention`, the optional text encoder and the v13 tuning. The
+[Settings guide](#settings-guide) covers every one, with when to change it. Hover any model selector for the
 recommended file and folder; press **R** after adding models. A missing model shows as `MISSING: <file>`, and the
 run stops with the download link instead of failing halfway.
 
 ---
 
-<sub><code>// 05 · hardware</code></sub>
+<sub><code>// 05 · settings</code></sub>
+
+## Settings guide
+
+Every setting, what it changes, and when to touch it. The defaults are the values that measured best on the test
+shots, so **start with the defaults and change one thing at a time**. Re-rendering is cheap after the first run:
+each stage is cached, so changing a late setting (format, the v13 options, temporal smoothing) reuses the LTX passes.
+
+### Pick your mode first
+
+| Your shot | Mode | Why |
+|---|---|---|
+| One person, nobody else near them | **Best (v12)** | Nothing to separate. Fast gives almost the same matte. |
+| Several people, nobody touching or crossing the subject | **Best (v12)** | The others are painted out and LTX mattes the subject alone. |
+| Look-dev, timing tests, lots of shots to triage | **Fast (v7)** | About half the time. Edges against other people are a little weaker. |
+| Someone's hand, arm or hair **crosses in front of** the subject | **handle overlapping people (v13)** | Their fingers and curls get their own generative edge instead of a soft ViTMatte line. |
+| The subject's arm is around someone, hands on shoulders, a hug | **v13**, plus an **add** click on the hand (see below) | v13 keeps the arm crisp over the other person. |
+| A crowd behind the subject, nobody crossing them | **Best (v12)** | v13 costs a third LTX pass and only helps where people overlap. |
+
+### Overlap mode (v13)
+
+<p align="center">
+<img src="docs/images/wipe_fingers.gif" width="440" alt="wipe: fingers crossing the subject, v12 vs v13">
+<img src="docs/images/wipe_hair.gif" width="440" alt="wipe: hair crossing the subject, v12 vs v13">
+</p>
+
+<sub>Matte the man in the striped shirt, comped over green. Left of the line is **Best (v12)**, right is **Overlap
+mode (v13)**. **Fingers:** his friend's waving hand crosses his chest; v12 gives a soft blob with the shirt showing
+through the fingertips, v13 cuts each finger out cleanly. **Hair:** her curls fall over his shoulder; v12 cuts his
+shoulder off along a smooth line, v13 cuts her curls out of his shirt and keeps the shoulder underneath.</sub>
+
+**What it does.** v12 paints the other people out and mattes the subject alone, so where someone crosses the
+subject there is no generative edge, only a ViTMatte one. v13 keeps the real plate and runs three LTX passes:
+
+| Pass | LTX is steered to | Gives |
+|---|---|---|
+| 1 | the whole plate | everyone together, used to clip the other two |
+| 2 | the subject (its SAM3 mask as LTX's attention mask) | the subject, including the parts others hide |
+| 3 | everyone else at once (their masks combined) | one matte of all the other people |
+
+Then it subtracts pass 3 from pass 2 wherever the others are **in front**. SAM3 decides that where it sees only one
+person; a depth pass decides where SAM3 gives a pixel to both people or to neither. The cost stays at 3 passes
+however many people are in the shot (one pass per person measured the same).
+
+**Measured.**
+
+| Test | Best (v12) | Overlap mode (v13) |
+|---|:---:|:---:|
+| Overlap error on a synthetic clip with exact ground truth (her hair moved across his collar) | 105.6 | **21.5** (5x lower) |
+| Kids shot, 247 frames: edge detail match | 88.7% | **90.3%** |
+| Kids shot: flicker vs LTX alone (motion compensated) | **1.2x** | 1.9x |
+| 49-frame preview, RTX 5090 | about 4 min | about 4.7 min |
+| 247-frame shot, RTX 5090 | about 25 min | about 26.5 min |
+
+The flicker rise comes from the overlap edges: sharp fingers and curls that move score as more movement than a soft
+line that doesn't. Check it in motion on your shot. The synthetic ground truth was built from LTX mattes, so it
+favours LTX-like edges.
+
+**v13 settings** (always listed, greyed out until the switch is on):
+
+| Setting | Default | What it does | Turn it... |
+|---|:---:|---|---|
+| **handle overlapping people (v13)** | off | Switches to the 3-pass overlap mode above and greys out `quality`. Needs at least one other person picked (they are found automatically when you click the subject); with nobody else it runs Best (v12). | **On** when anyone crosses the subject. |
+| **use depth for front/back** | on | A small depth model (Depth Anything V2 Small, 99 MB, downloads itself) settles who is in front where SAM3 is unsure: thin, fast fingers over a chest, where SAM3's coarse masks give the pixels to both people. The answer is voted over about 25 px, so the palm carries the fingertips. | **Off** only to save a few seconds, or if you see a wrong front/back flip where SAM3's masks are clean. With it off, fast fingers in front of the subject can ghost. |
+| **sharpen hair over subject** | off | Re-fits the other person's hair matte to the plate's own edges (a guided filter, plate brightness as the guide): more single strands, cleaner gaps between curls. | **On** for dark hair over a lighter subject (or the reverse) when the curls look soft or the gaps between them look grey. **Off** if the subject wears stripes, checks or a busy print: the filter can read dark stripes as hair and cut thin lines into the subject. |
+| **sharpen hair radius (px)** | 4 | How far the filter looks for edges. Greyed out until sharpen is on. | **Lower (2 to 3)** for fine, separated strands. **Higher (6 to 8)** for thick curls or a noisy, compressed plate. Higher also picks up more clothing pattern. |
+
+**Under ⚙ Advanced** (v13 tuning, also greyed out until the switch is on). These were swept on the test shots;
+change them only to fix a specific problem:
+
+| Setting | Default | What it does | When to change it |
+|---|:---:|---|---|
+| **v13 attention grow (px)** | 20 | Grows each SAM3 mask before it steers LTX, so hair beyond the SAM3 outline still gets matted. | **Raise to 30 to 40** if long or wild hair beyond the SAM3 outline is cut off. **Lower to 10** if the subject's matte picks up the edge of a person standing right next to them. |
+| **v13 attention feather** | 10 | Softens that mask's edge. 0 = hard edge, which cut the hair (about 1.5x the error). | Leave at 10. Higher (15 to 20) only for very soft, flyaway hair. |
+| **v13 attention strength** | 1.0 | How strictly LTX follows the mask. 0.7 measured about 1.3x the error. | Leave at 1.0. |
+| **v13 occluder reach (px)** | 20 | How far past the overlap the subtraction reaches, to catch the soft edge of whoever is in front: strand tips, motion-blurred fingertips. | **Raise to 30 to 40** if the tips of someone's fingers or hair still show as a faint ghost over the subject. **Lower to 10** if the subject's own thin parts lying next to someone (fingers on a shoulder) get nibbled. |
+| **v13 invented-limb cap (px)** | 90 | LTX draws parts of the subject it can't see; that's how it fills in behind others. Anything further than this from the subject's SAM3 mask is removed, fading over the last 40 px. Stops invented arms. | **Raise (150 to 250)** if real edges far from the SAM3 mask get cut: big hair, a scarf, a raised hand SAM3 missed (an add click is the better fix). **Lower (60)** if a faint extra limb or ghost appears beside the subject. |
+| **v13 front/back smoothing (frames)** | 3 | Averages the front/behind decision over this many frames so it can't pop. | **Raise to 5** if an overlap edge flickers between in front and behind. **1** for very fast action where 3 frames lag behind a quick hand. |
+
+**When something is wrong in v13:**
+
+| You see | Cause | Fix |
+|---|---|---|
+| The subject's own hand or arm is missing where it rests on someone (an arm round a friend's neck) | SAM3 gave that limb to the other person, so v13 treats it as theirs and subtracts it. Depth can't help: the hand really is at the friend's depth. | **Shift-click (add)** the hand on a frame where it touches. One click fixed the hand in the kids test. |
+| Someone else's hand appears **inside** the subject's matte | SAM3 gave their hand to the subject. | **Alt-click (cut)** their hand on the first frame it appears. |
+| Ghosted, half-transparent fingers over the subject | The other person's fingertips aren't fully subtracted. | Keep **use depth** on, then raise **occluder reach** to 30. |
+| Grey gaps between someone's curls over the subject | LTX draws their hair soft over a light background. | **Sharpen hair** on. |
+| Thin dark lines cut into a striped or checked shirt | Sharpen hair is reading the stripes as hair. | Sharpen hair off, or **radius** down to 2. |
+| A faint extra arm or blob next to the subject | A limb LTX invented. | Lower **invented-limb cap** to 60. |
+| An overlap edge pops between frames | The front/behind decision flips. | **Front/back smoothing** to 5. |
+
+### All other settings
+
+**Main**
+
+| Setting | Default | What it does | When to change it |
+|---|:---:|---|---|
+| `images` | | The plate. Any chain works (crop, resize, colour). | Feed 1920x1088 or 1920x1080 for the best edges. For 4K, feed a 1080p proxy and scale the alpha up. |
+| `fps` | 24 | Plate frame rate, passed to LTX. | Wire it from Get Video Components or Load Plate Sequence. Set it by hand only for loose images. |
+| `first_frame` | 1 | Frame number of the first image; output files use it. | **1001** (or your plate's start) for VFX numbering. Load Plate Sequence sets it for you. |
+| `quality` | Best (v12) | 2 LTX passes (Best) or 1 (Fast). Greyed out in v13. | Fast for look-dev and triage, Best for finals. |
+| `filename_prefix` | `comfy_pro_alpha/shot` | Output folder under `ComfyUI/output/`. | One per shot (`show/sh010_hero`) so renders don't overwrite each other. |
+| `format` | png16 | 16-bit PNG or half-float EXR. | **exr** for a Nuke/EXR pipeline. Both hold the full soft edge. |
+| model selectors | the recommended files | LTX model, alpha-gen IC-LoRA, video VAE (must be the **conv** VAE), audio VAE, ViTMatte. | Only to pick a GGUF (see [Hardware](#hardware)) or a file in another folder. `MISSING:` means the file isn't found. |
+
+**⚙ Advanced**
+
+| Setting | Default | What it does | When to change it |
+|---|:---:|---|---|
+| `text encoder` | built-in | The empty-prompt conditioning alpha-gen uses. | Never. The built-in one is bit-identical to running the 13 GB encoder. |
+| `frames per chunk` | 49 | LTX renders the shot in chunks of this many frames (8n+1). | Keep 49 at 1080p (it fits a 32 GB GPU). **Lower (33 or 25)** if you run out of memory: more chunks means more joins and a slower render. |
+| `overlap frames` | 9 | Frames shared by neighbouring chunks and cross-faded. | **Raise (17)** if you can see a jump where two chunks meet (every 40 frames at the defaults). Lower to save time on very long shots. |
+| `seed` | 42 | LTX's noise seed. | Try another seed if one stretch shows a strange edge. It is a cheap second opinion: a new seed moves the edge about 0.03 on average. |
+| `erode` / `dilate` | 10 / 15 | The ViTMatte trimap: how far inside / outside the SAM3 edge the "unknown" band reaches. Used where LTX leaves the selection empty (props, background objects) and, in v12, against other people. | **Raise dilate (25 to 30)** if ViTMatte cuts frizzy edges short. **Lower both (5 / 8)** if ViTMatte bleeds into the background on a hard-edged object. |
+| `near_px` | 15 | v12 and Fast: how close to another person the ViTMatte edge takes over from LTX. Not used in v13. | **Raise (25)** if the matte grows a halo of the neighbour where two people touch. **Lower (8)** to keep more LTX edge near them. |
+| `temporal smoothing (frames)` | 2 | Smooths the SAM3/ViTMatte parts over 2 frames each side, warped by optical flow. LTX edges are already steady. | **Raise to 3 or 4** if ViTMatte edges (props, the v12 zone between people) chatter. **0** for very fast motion if those edges lag or ghost. |
+| `sam3_threshold` | 0.3 | How confident SAM3 must be to keep tracking a pick through the shot. | **Lower (0.2)** if the subject or a part drops out of the matte in dark, blurred or small frames. **Raise (0.4 to 0.5)** if the track jumps onto something else. |
+| `fast_attention` | on | Comfy Kitchen int8 attention: about 36% faster, edge difference 0.004. | Leave on. The node falls back to PyTorch attention by itself when Comfy Kitchen is unavailable. |
+
+**Picker actions** (in the viewer)
+
+| Action | Use it when |
+|---|---|
+| **Click** | Pick the subject on a frame where it is fully visible. Everyone else it finds is excluded. |
+| **Shift-click** | **Add**: a part SAM3 missed (a hand, a held prop), or another object to stack into the same matte. In v13, add the subject's limb that rests on someone. |
+| **Alt-click** | **Cut**: someone else's part inside the subject's mask (a hand on the shoulder). |
+| **Ctrl-click** | Remove an add or cut marker. |
+| **Find** | Hard to click? Type a concept: `person`, `dog`, `red car`, `dog, person`. |
+
+Add and cut on the **first frame** the part appears: tracking runs forward from the click.
+
+---
+
+<sub><code>// 06 · hardware</code></sub>
 
 ## Hardware
 
@@ -253,7 +396,7 @@ model list, e.g. `LTX-2.5-Distilled-Q4_K_M.gguf` (15 GB, [realrebelai/LTX-2.5_GG
 Use it only to save disk space: GGUF can't be streamed from disk, so it needs *more* RAM (27 vs 21 GB) and runs about
 30% slower. Edge difference 0.05; it looks the same.
 
-<sub><code>// 06 · install</code></sub>
+<sub><code>// 07 · install</code></sub>
 
 ## Install
 
@@ -301,6 +444,7 @@ Restart ComfyUI afterwards.
 | 4 | `ltx-2.5-audio-vae-bf16.safetensors` | 0.4 GB | [Lightricks/LTX-2.5](https://huggingface.co/Lightricks/LTX-2.5/blob/main/vae/ltx-2.5-audio-vae-bf16.safetensors) | `models/vae/` |
 | 5 | `sam3.safetensors` | 3.5 GB | **automatic** on first run ([apozz/sam3-safetensors](https://huggingface.co/apozz/sam3-safetensors)) | `models/sam3/` |
 | 6 | ViTMatte `vitmatte-base-composition-1k` | 0.4 GB | **automatic** on first run ([hustvl/vitmatte-base-composition-1k](https://huggingface.co/hustvl/vitmatte-base-composition-1k)) | `models/vitmatte/vitmatte-base-composition-1k/` |
+| 7 | Depth Anything V2 Small | 0.1 GB | **automatic** on the first overlap-mode (v13) run ([depth-anything/Depth-Anything-V2-Small-hf](https://huggingface.co/depth-anything/Depth-Anything-V2-Small-hf)) | `models/depthanything/Depth-Anything-V2-Small-hf/` |
 
 > **Use the conv video VAE (#3)**, `...-video-vae-conv-bf16`, not `...-video-vae-bf16`: only the conv VAE can encode
 > the plate that guides alpha-gen. **No text encoder needed**: the pack ships the empty-prompt conditioning
@@ -334,8 +478,10 @@ ComfyUI/
     │   └── ltx-2.5-audio-vae-bf16.safetensors
     ├── sam3/
     │   └── sam3.safetensors                 (downloads itself)
-    └── vitmatte/
-        └── vitmatte-base-composition-1k/    (downloads itself)
+    ├── vitmatte/
+    │   └── vitmatte-base-composition-1k/    (downloads itself)
+    └── depthanything/
+        └── Depth-Anything-V2-Small-hf/      (downloads itself, overlap mode only)
 ```
 
 <details>
@@ -354,7 +500,7 @@ hf download Lightricks/LTX-2.5-22b-IC-LoRA-Alpha-Gen ltx-2.5-22b-ic-lora-alpha-g
 Models already in a subfolder (`models/diffusion_models/LTX/...`) work too: the node finds them by file name.
 Press **R** in ComfyUI after adding files. **Low-RAM tip:** keep `models/` on an NVMe SSD (see [Hardware](#hardware)).
 
-<sub><code>// 07 · limits</code></sub>
+<sub><code>// 08 · limits</code></sub>
 
 ## What it can and can't do
 
@@ -365,26 +511,27 @@ Press **R** in ComfyUI after adding files. **Low-RAM tip:** keep `models/` on an
 | 4K and up | Matte a 1080p proxy and scale the alpha up. |
 | Shot length | Up to 24 chunks, about **960 frames** at the default settings. Split longer shots. |
 | Frame range | From the frame you pick on to the end of the plate; earlier frames come out empty. |
-| Speed (RTX 5090, Best) | 49-frame preview about 4 min; a 247-frame shot about 25 min. |
+| Speed (RTX 5090, Best) | 49-frame preview about 4 min; a 247-frame shot about 25 min. Overlap mode (v13): about 4.7 and 26.5 min. |
 | Output | Alpha as 16-bit PNG or half-float EXR, plate frame numbers kept (`plate.1001` gives `alpha_01001`). |
 | Subjects | One matte per run; it can stack several objects (a man, his glass and the table). |
 
 | Works well | Works with care | Doesn't work (yet) |
 |---|---|---|
-| People, hair, animals with fur, vehicles with dust, props | A hand or arm crossing another person: the edge between them comes from SAM3/ViTMatte, so it is softer | Frames before the pick frame |
+| People, hair, animals with fur, vehicles with dust, props | A hand, arm or hair crossing the subject: turn on **overlap mode (v13)**. If the subject's own limb rests on someone and goes missing, add a click on it | Frames before the pick frame |
 | Busy shots with several people (the others are painted out) | Background objects (a parked car): LTX mattes what it reads as the main subject; the **LTX cover** badge goes red and ViTMatte takes over | A subject fully hidden mid-shot (a car driving in front): SAM3 can lose the track. Pick after the occlusion or split the shot |
 | Video files and EXR/PNG/TIF sequences | More than 8 other subjects near the target: only the nearest 8 are painted out (each costs about 14 s) | Despill: light hair fringes are plate colour spill. Despill in comp |
 | 12 GB VRAM, 16 GB RAM machines (slower) | | |
 
 **Not tested yet:** plates smaller than 1080p, vertical video, heavy motion blur, AMD and Apple GPUs.
 
-<sub><code>// 08 · credits</code></sub>
+<sub><code>// 09 · credits</code></sub>
 
 ## Credits
 
 Built on [LTX-2.5 and the IC-LoRA Alpha-Gen](https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Alpha-Gen) by
 Lightricks, [SAM3](https://github.com/facebookresearch/sam3) by Meta,
 [ViTMatte](https://huggingface.co/hustvl/vitmatte-base-composition-1k) by HUST Vision Lab,
+[Depth Anything V2](https://github.com/DepthAnything/Depth-Anything-V2) (Small) by its authors at HKU and TikTok,
 [ComfyUI-SAM3](https://github.com/PozzettiAndrea/ComfyUI-SAM3) and [ComfyUI](https://github.com/comfyanonymous/ComfyUI).
 ONYX Ai Matte is a product of its respective owner; it is referenced here only as a design comparison.
 
@@ -392,7 +539,7 @@ ONYX Ai Matte is a product of its respective owner; it is referenced here only a
 I built this for the shots I actually get: one person out of a busy plate, VFX frame numbers kept, 16-bit or EXR
 out, and a QC number I can check before anything goes to comp.
 
-<sub><code>// 09 · license</code></sub>
+<sub><code>// 10 · license</code></sub>
 
 ## License
 
@@ -410,6 +557,7 @@ you accept those when you download them from their original pages:
 | SAM3 | Meta | [SAM License](https://github.com/facebookresearch/sam3/blob/main/LICENSE) |
 | ComfyUI-SAM3 nodes | Andrea Pozzetti | [GPL-3.0](https://github.com/PozzettiAndrea/ComfyUI-SAM3/blob/main/LICENSE) (wrapper code; SAM3 itself stays under the SAM License) |
 | ViTMatte | HUST Vision Lab | [MIT](https://github.com/hustvl/ViTMatte/blob/main/LICENSE) (code), [Apache-2.0](https://huggingface.co/hustvl/vitmatte-base-composition-1k) (weights) |
+| Depth Anything V2 Small (overlap mode only) | Depth Anything V2 authors | [Apache-2.0](https://huggingface.co/depth-anything/Depth-Anything-V2-Small-hf) (the Base and Large models are non-commercial and are not used) |
 | ComfyUI | Comfy Org | [GPL-3.0](https://github.com/comfyanonymous/ComfyUI/blob/master/LICENSE) |
 
 A commercial license for this node pack does **not** include rights to these models. For commercial work, check

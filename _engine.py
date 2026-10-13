@@ -176,6 +176,104 @@ def v12_blend(v7, v11, sel, others, near_px=15):
     return wgt * v7 + (1 - wgt) * v11
 
 
+def attn_mask(m, grow=20, blur=10.0):
+    """SAM mask -> attention mask for the IC-LoRA guide (v13): grown so hair outside the SAM outline still gets
+    attention, feathered so it fades out. A hard SAM mask cuts the hair (tested: 1.5x the error)."""
+    m = cv2.dilate(_f32(m), ellipse(grow)) if grow else _f32(m)
+    return cv2.GaussianBlur(m, (0, 0), blur) if blur else m
+
+
+def _local_mean(v, m, sigma, fallback):
+    """Gaussian-weighted mean of v over mask m around every pixel (fallback where m has no support)."""
+    w = cv2.GaussianBlur(m.astype(np.float32), (0, 0), sigma)
+    return np.where(w > 1e-3, cv2.GaussianBlur(v * m, (0, 0), sigma) / np.maximum(w, 1e-3), fallback)
+
+
+def front_map(ct, co, vis_t, vis_o, grow=20, min_area=200, reach=15.0, depth=None, depth_reach=30.0):
+    """v13: where the other subjects are IN FRONT of the target, as a soft weight.
+
+    ct / co: target / others mattes from the attention passes, clipped by LTX on the plate. These are amodal: LTX
+    also draws the parts each one hides. Where both are > .5 one hides the other, and whoever SAM sees there is in
+    front (agreed with a Depth Anything pass on 97-100% of overlaps). The vote is LOCAL (within ~`reach` px), not
+    per overlap blob: one blob can hold the target's real arm in front of someone AND an invented arm behind them."""
+    both = (ct > .5) & (co > .5)
+    b = both.astype(np.float32)
+    vt, vo = vis_t > .5, vis_o > .5
+    so = cv2.GaussianBlur(b * vo, (0, 0), reach)
+    st = cv2.GaussianBlur(b * vt, (0, 0), reach)
+    # SAM's own answer wins where it is clear; pixels SAM gives to both or neither are settled by depth when there
+    # is a depth pass (a hand in front of a chest: SAM's coarse masks give the fingers to both people, a local vote
+    # lets the big chest win), else by the local vote. (Making the target's selection final instead broke hair over
+    # the target: SAM often includes it, GT error 4x.)
+    unclear = vo == vt
+    if depth is not None:
+        d = _f32(depth)
+        only_t, only_o = vt & ~vo, vo & ~vt
+        dt = _local_mean(d, only_t, depth_reach, float(np.median(d[only_t])) if only_t.any() else 0.0)
+        do = _local_mean(d, only_o, depth_reach, float(np.median(d[only_o])) if only_o.any() else 1.0)
+        near_o = both & (np.abs(d - do) < np.abs(d - dt))
+        # vote the per-pixel depth answers over ~25 px: depth blurs thin fast fingers into what is behind them, the
+        # palm's clear answer carries to the tips (far-apart regions still decide separately)
+        settle = cv2.GaussianBlur(near_o.astype(np.float32), (0, 0), 25) > cv2.GaussianBlur((both & ~near_o).astype(np.float32), (0, 0), 25)
+    else:
+        settle = so > st
+    front = (both & ((vo & ~vt) | (unclear & settle))).astype(np.uint8)
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(front, connectivity=8)
+    small = np.isin(lab, np.nonzero(stats[:, cv2.CC_STAT_AREA] < min_area)[0])
+    front[small & (lab > 0)] = 0
+    # grow into the others' soft edge (strands, fingers) but never into overlap the target won: there the others'
+    # matte is the part they hide BEHIND the target, and subtracting it would bite holes in the target
+    back = cv2.GaussianBlur((both & ~front.astype(bool)).astype(np.float32), (0, 0), 2)
+    # HARD reach: full weight on everything within `grow` px of an in-front pixel, so a fast finger's tip (outside
+    # the overlap, where the target pass is already soft) is subtracted fully, not half (a wide blur ghosted it)
+    return cv2.GaussianBlur(cv2.dilate(front, ellipse(grow)).astype(np.float32), (0, 0), 2) * (1 - back)
+
+
+def guided(I, p, r=4, eps=1e-3):
+    """Grey guided filter (He et al.): `p` re-fitted to the edges of image `I` (both 0-1) within ~r px."""
+    box = lambda x: cv2.boxFilter(x, -1, (2 * r + 1, 2 * r + 1))
+    mI, mp = box(I), box(p)
+    a = (box(I * p) - mI * mp) / (box(I * I) - mI * mI + eps)
+    return box(a) * I + box(mp - a * mI)
+
+
+def v13_overlap(ltx, attn_t, attn_o, sel, others, out, down=4, near=50, far=90, depth=None, tsmooth=3, grow=20,
+                gray=None, guide_r=4, guide_eps=1e-3):
+    """v13 matte: target attention pass minus the others' attention pass wherever the others are in front.
+
+    Both passes run on the REAL plate (no paint-out), so hair and fingers crossing the target keep their own
+    generative edge. The front/back weights are smoothed over 5 frames at 1/`down` resolution (they are blurry
+    anyway), so no decision pops between frames and RAM stays low. The target matte fades out between `near` and
+    `far` px from its SAM selection: anything further is a limb LTX invented, even where nobody covers it.
+    `gray` (optional, [N,H,W] uint8 or 0-1): plate luma; when given, the others' matte is re-fitted to the plate's
+    edges where it is subtracted (sharper strands over the target, the node's "sharpen hair" switch)."""
+    n, h, w = out.shape
+    sh, sw = max(1, h // down), max(1, w // down)
+    wts = np.empty((n, sh, sw), np.float32)
+    for f in range(n):
+        lt = _f32(ltx[f])
+        ct, co = np.minimum(_f32(attn_t[f]), lt), np.minimum(_f32(attn_o[f]), lt)
+        dp = None if depth is None else depth[f]
+        wts[f] = cv2.resize(front_map(ct, co, _f32(sel[f]), _f32(others[f]), grow=grow, depth=dp), (sw, sh),
+                            interpolation=cv2.INTER_AREA)
+    if tsmooth > 1:
+        k = tsmooth // 2
+        pad = np.concatenate([wts[:1]] * k + [wts] + [wts[-1:]] * k)
+        wts = sum(pad[i:i + n] for i in range(tsmooth)) / tsmooth
+    for f in range(n):
+        lt = _f32(ltx[f])
+        ct, co = np.minimum(_f32(attn_t[f]), lt), np.minimum(_f32(attn_o[f]), lt)
+        wt = np.clip(cv2.resize(wts[f], (w, h), interpolation=cv2.INTER_LINEAR), 0, 1)
+        if gray is not None and wt.max() > .05:
+            # LTX draws an occluder's hair over the target soft (~.5 between curls, strands smeared): re-fit the
+            # others' matte to the plate's own edges (dark strand / bright shirt) where it is subtracted
+            g = _f32(gray[f]) / (255.0 if gray.dtype == np.uint8 else 1.0)  # node passes uint8 (RAM), harness 0-1
+            co = np.where(wt > .05, np.clip(guided(g, co, guide_r, guide_eps), 0, 1), co)
+        d = cv2.distanceTransform((_f32(sel[f]) <= .5).astype(np.uint8), cv2.DIST_L2, 5)
+        out[f] = np.clip(ct * np.clip((far - d) / (far - near), 0, 1) - wt * co, 0, 1)
+    return out
+
+
 def ltx_fallback(alpha, ltx, sel, refined, core_px=10, reach=25.0, lo=0.3, hi=0.7, down=8, out=None):
     """Per AREA: how much LTX covers the selection's core around each pixel (blur radius ~reach px). Where LTX
     misses part of the selection (it only mattes what it reads as the main subject: a table, a parked car), blend
