@@ -509,11 +509,19 @@ class TileGuide(io.ComfyNode):
 
         stop = start + length if end < 0 else min(start + length, end)
         img = _pad_chunk(images[start:stop, y:y + height, x:x + width], length)
-        guide = nodes.NODE_CLASS_MAPPINGS["LTXAddVideoICLoRAGuide"]
-        out = guide.execute(positive=positive, negative=negative, vae=vae, latent=latent, image=img, frame_idx=0,
-                            strength=1.0, latent_downscale_factor=latent_downscale_factor, crop="disabled",
-                            use_tiled_encode=False, tile_size=256, tile_overlap=64)
-        return io.NodeOutput(*out.result)
+        guide = nodes.NODE_CLASS_MAPPINGS.get("LTXAddVideoICLoRAGuide")
+        if guide is None:
+            raise RuntimeError("Native-resolution edges need ComfyUI's LTXAddVideoICLoRAGuide node: update ComfyUI "
+                               "(or switch native-resolution edges off).")
+        kw = dict(positive=positive, negative=negative, vae=vae, latent=latent, image=img, frame_idx=0, strength=1.0,
+                  latent_downscale_factor=latent_downscale_factor, crop="disabled", use_tiled_encode=False,
+                  tile_size=256, tile_overlap=64)
+        out = guide.execute(**kw) if hasattr(guide, "execute") else getattr(guide(), guide.FUNCTION)(**kw)
+        res = tuple(getattr(out, "result", out) or ())  # V3 NodeOutput or a V1 tuple
+        if len(res) < 3:
+            raise RuntimeError(f"LTXAddVideoICLoRAGuide returned {len(res)} outputs, expected positive, negative, "
+                               "latent: this ComfyUI version changed the node; please report it.")
+        return io.NodeOutput(*res[:3])
 
 
 class DecodeStitch(io.ComfyNode):
@@ -564,9 +572,11 @@ class TileMerge(io.ComfyNode):
         feathers = [E.tile_feather(grid, i, (W, H)) for i in range(len(grid))]
         src = [_h(tiles[f"tile_{k}"]) for k in range(len(used))]
         alpha = np.zeros((n, H, W), np.float16)
-        cover = np.zeros((n, H, W), np.float16)
+        cover = np.zeros((1, H, W), np.float16)  # same for every frame: the tile set is chosen for the whole range
         for f in range(n):
-            alpha[f], cover[f] = E.stitch_tiles([t[f] for t in src], grid, used, (W, H), feathers)
+            alpha[f], c = E.stitch_tiles([t[f] for t in src], grid, used, (W, H), feathers)
+            if f == 0:
+                cover[0] = c
         return io.NodeOutput(_half(alpha), _half(cover))
 
 
@@ -602,8 +612,12 @@ class NativeEdges(io.ComfyNode):
         used = E.select_tiles(sel, grid, (W, H))
         print(f"[ComfyProAlpha] native edges: {len(used)} of {len(grid)} tiles at {W}x{H}")
         if not used:  # SAM3 lost the subject in the whole range: Final keeps the scaled-up proxy alpha
-            z = torch.zeros((count, H, W), dtype=torch.float16)
+            z = torch.zeros((0, 1, 1), dtype=torch.float16)
             return io.NodeOutput(z, z, 0)
+        if len(used) > TileMerge.MAX:
+            raise ValueError(f"A {W}x{H} plate needs {len(used)} native tiles; native-resolution edges handle up to "
+                             f"{TileMerge.MAX} (plates up to about 10K wide). Switch native-resolution edges off, or "
+                             "crop the plate.")
         s = W / sel.shape[2]
         g = GraphBuilder()
         iso = g.node("ComfyProAlpha_NativeIsolate", plate=lk["plate"], start=start, selection=lk["selection"],
@@ -624,19 +638,20 @@ class NativeEdges(io.ComfyNode):
 
 def _native_alpha(alpha, native_hw, tiles, coverage, others):
     """v14: the proxy alpha scaled up to the plate's native size; with tiles, their edges merged in away from the
-    other subjects (float16). others: the proxy's others mask."""
+    other subjects (float32, like the 1080p path). others: the proxy's others mask. coverage: one frame (or one per
+    frame); empty tiles (nothing rendered) = no tiles."""
     import cv2
 
     H, W = native_hw
     n, _, pw = alpha.shape
-    T = _h(tiles) if tiles is not None else None
-    C = _h(coverage) if coverage is not None else None
-    out = np.empty((n, H, W), np.float16)
+    T = _h(tiles) if tiles is not None and len(tiles) else None
+    C = _h(coverage) if T is not None else None
+    out = np.empty((n, H, W), np.float32)
     for f in range(n):
         a = np.clip(cv2.resize(alpha[f], (W, H), interpolation=cv2.INTER_CUBIC), 0, 1)
         if T is not None:
             o = cv2.resize(E._f32(others[f]), (W, H), interpolation=cv2.INTER_LINEAR)
-            a = E.merge_native(a, T[f], C[f], W / pw, o)
+            a = E.merge_native(a, T[f], C[0] if len(C) == 1 else C[f], W / pw, o)
         out[f] = a
     return out
 

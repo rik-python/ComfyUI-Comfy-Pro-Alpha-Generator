@@ -13,7 +13,7 @@ import { api } from "../../scripts/api.js";
 const NODE = "ComfyProAlphaGenerator";
 const LEGACY = "SelectiveMatte";  // old node id: workflows saved before the rename
 const TITLE = "Comfy Pro Alpha Generator";
-const VERSION = "0.4.0";
+const VERSION = "0.4.1";
 const ADVANCED = ["text_encoder", "chunk", "overlap", "fast_attention",
     "seed", "control_after_generate", "erode", "dilate", "near_px", "stabilize_radius", "sam3_threshold"];
 const HIDDEN = ["picks", "render"];
@@ -604,6 +604,7 @@ class Picker {
     // ------------------------------------------------------------ data
     async restore() {
         this.info = this.picks.view || null;
+        this.syncQuality();  // reopened workflow: grey native_edges for the saved plate size
         if (!this.info) return this.render();
         this.slider.max = this.info.frames - 1;
         await this.restoreDetections();
@@ -1062,6 +1063,14 @@ class Picker {
             const b = badge("LTX cover", `${c.toFixed(0)}%`, c >= 90 ? "sm-g" : c >= 60 ? "sm-a" : "sm-r");
             b.title = "How much of the subject LTX alpha-gen matted. Low: LTX did not see it as the main subject, "
                     + "so those frames use the ViTMatte edge instead.";
+            kids.push(b);
+        }
+        if (info.native) {  // v14: plate bigger than 1920x1088, matted on a proxy
+            const b = badge("native", info.native_edges ? `${info.native} · ${info.tiles} tiles` : `${info.native} · scaled up`,
+                            info.native_edges ? "sm-g" : "");
+            b.title = info.native_edges
+                ? "Matted on a 1080p proxy; the edges were rendered again on native-resolution tiles and merged in."
+                : "Matted on a 1080p proxy and scaled up (native-resolution edges off, or no edge found to refine).";
             kids.push(b);
         }
         const tog = btn("quiet", "preview", this.result.view === "alpha" ? "Show comp" : "Show alpha");

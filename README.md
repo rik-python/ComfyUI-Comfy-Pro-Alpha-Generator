@@ -367,7 +367,7 @@ change them only to fix a specific problem:
 | `fps` | 24 | Plate frame rate, passed to LTX. | Wire it from Get Video Components or Load Plate Sequence. Set it by hand only for loose images. |
 | `first_frame` | 1 | Frame number of the first image; output files use it. | **1001** (or your plate's start) for VFX numbering. Load Plate Sequence sets it for you. |
 | `quality` | Best (v12) | 2 LTX passes (Best) or 1 (Fast). Greyed out in v13. | Fast for look-dev and triage, Best for finals. |
-| `native-resolution edges (v14)` | on | Plates bigger than 1920x1088: LTX renders the subject's edges again on native 1920x1088 tiles and merges them into the proxy matte. Works with every mode. Greyed out for plates of 1080p or less. | **Off** for a fast first look, or when RAM is short on a long 4K shot: the 1080p matte scaled up, 2 to 3x faster. Leave it **on** for finals with fine hair, fur or flyaways. |
+| `native-resolution edges (v14)` | on | Plates bigger than 1920x1088: LTX renders the subject's edges again on native 1920x1088 tiles and merges them into the proxy matte. Works with every mode. Greyed out for plates of 1080p or less. | **Off** for a fast first look, when RAM is short on a long 4K shot, or on plates only a little over 1080p (2K): little extra detail there for the full tile cost. Off gives the 1080p matte scaled up, 2 to 3x faster. Leave it **on** for finals with fine hair, fur or flyaways. |
 | `filename_prefix` | `comfy_pro_alpha/shot` | Output folder under `ComfyUI/output/`. | One per shot (`show/sh010_hero`) so renders don't overwrite each other. |
 | `format` | png16 | 16-bit PNG or half-float EXR. | **exr** for a Nuke/EXR pipeline. Both hold the full soft edge. |
 | model selectors | the recommended files | LTX model, alpha-gen IC-LoRA, video VAE (must be the **conv** VAE), audio VAE, ViTMatte. | Only to pick a GGUF (see [Hardware](#hardware)) or a file in another folder. `MISSING:` means the file isn't found. |
@@ -443,7 +443,9 @@ one. Measured on the RTX 5090 machine (disk streaming on), UHD 4K, Best:
 RAM grows with shot length. On a 64 GB machine, split long 4K shots into runs of about 100 frames (estimated from the
 two measurements), or preview first and render the full shot in parts. These numbers are with the node's `comp` output
 unconnected: wiring `comp` on a 4K plate adds about 0.1 GB per frame (24 GB on the 242-frame shot; computed from the
-frame size, not measured). The alpha files on disk don't need it.
+frame size, not measured). The alpha files on disk don't need it. Measured on v0.4.0; since v0.4.1 the 4K alpha output
+is full 32-bit like the 1080p one, which adds about 4 GB at 242 frames with native edges off (computed, not
+measured). With native edges on it evens out: the tile coverage map is now stored once instead of per frame.
 
 **GGUF (optional).** With [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF) installed, `.gguf` files appear in the
 model list, e.g. `LTX-2.5-Distilled-Q4_K_M.gguf` (15 GB, [realrebelai/LTX-2.5_GGUFs](https://huggingface.co/realrebelai/LTX-2.5_GGUFs)).

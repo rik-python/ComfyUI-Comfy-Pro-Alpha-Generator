@@ -269,7 +269,8 @@ class ComfyProAlphaGenerator(io.ComfyNode):
                     "Plates bigger than 1920x1088: LTX also renders the subject's edges on native-resolution "
                     "1920x1088 tiles, for strand-level detail at the plate's own size. Roughly 2-3x the render "
                     "time on a 4K plate. Off: matte at 1080p and scale the alpha up (fast). Plates at 1080p or "
-                    "smaller are not affected.")),
+                    "smaller are not affected. Plates only a little bigger than 1080p (up to about 2300 px wide, "
+                    "e.g. 2K) gain little detail for the full tile cost: switch it off there to save time.")),
             ],
             outputs=[io.Mask.Output("alpha"), io.Image.Output("comp")],
             hidden=[io.Hidden.unique_id, io.Hidden.dynprompt],
