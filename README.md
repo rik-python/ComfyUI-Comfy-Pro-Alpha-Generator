@@ -639,7 +639,7 @@ you accept those when you download them from their original pages:
 
 | Component | By | License |
 |---|---|---|
-| LTX-2.5 and the alpha-gen IC-LoRA | Lightricks | [LTX-2.x Community License](https://github.com/Lightricks/LTX-2/blob/main/LICENSE-2_x): companies with $10M+ annual revenue need a paid commercial license from Lightricks |
+| LTX-2.5 and the alpha-gen IC-LoRA | Lightricks | [LTX-2.x Community License](https://github.com/Lightricks/LTX-2/blob/main/LICENSE-2_x) (copy: [LICENSE-LTX-2.x](LICENSE-LTX-2.x)): companies with $10M+ annual revenue need a paid commercial license from Lightricks |
 | ComfyUI-LTXVideo nodes | Lightricks | [LTX-2 Community License](https://github.com/Lightricks/ComfyUI-LTXVideo/blob/master/LICENSE) |
 | SAM3 | Meta | [SAM License](https://github.com/facebookresearch/sam3/blob/main/LICENSE) |
 | ComfyUI-SAM3 nodes | Andrea Pozzetti | [GPL-3.0](https://github.com/PozzettiAndrea/ComfyUI-SAM3/blob/main/LICENSE) (wrapper code; SAM3 itself stays under the SAM License) |
@@ -649,3 +649,11 @@ you accept those when you download them from their original pages:
 
 A commercial license for this node pack does **not** include rights to these models. For commercial work, check
 each license above as well, in particular the LTX revenue threshold.
+
+**LTX-2.x notice.** This pack runs Lightricks' LTX-2.x model and its alpha-gen IC-LoRA; it does not include them.
+Your use of LTX-2.x, its derivatives and their outputs through this pack is subject to the LTX-2.x Community License
+in full, including the use-based restrictions in Section 4 and Attachment A and the
+[LTX Acceptable Use Policy](https://static.lightricks.com/legal/ltx-acceptable-use-policy.pdf). A complete copy of
+the license (license date August 11, 2026) is in [LICENSE-LTX-2.x](LICENSE-LTX-2.x). Entities with annual revenue of
+$10M or more need a paid license from Lightricks for any use other than non-commercial use
+(ltxv-licensing@lightricks.com).
