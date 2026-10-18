@@ -165,3 +165,16 @@ def test_confidence_zero_when_subject_not_removed():
     # subject too, and an unmix would hand the background straight back
     I, a, F, B = _scene()
     assert E.clean_confidence(I.copy(), I, a, None, s=1.0)[(a > 0.05) & (a < 0.95)].max() < 0.05
+
+
+def test_quick_keeps_semi_solid_inside_far_from_background():
+    # LTX leaves fuzzy props (a bouquet) semi-solid deep inside the subject; no background shows through there,
+    # so quick must keep the plate instead of extending the core colour over it (seen as smears on the 4K bride)
+    h, w = 200, 300
+    a = np.clip((np.arange(w, dtype=np.float32) - 30) / 20, 0, 1)[None].repeat(h, 0)
+    a[70:130, 150:250] = 0.8                                   # 100+ px from any background
+    rng = np.random.default_rng(1)
+    I = np.broadcast_to(np.float32([0.9, 0.1, 0.1]), (h, w, 3)).copy()
+    I[70:130, 150:250] = rng.uniform(0, 1, (60, 100, 3)).astype(np.float32)  # flowers: texture, other colours
+    est = E.quick_colour(I, a, s=1.0)
+    assert np.array_equal(est[70:130, 150:250], I[70:130, 150:250])

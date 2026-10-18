@@ -519,7 +519,7 @@ def fill_from(x, mask, s=1.0, default=None):
     return out
 
 
-def quick_colour(I, a, s=1.0, erode=2, spread=1.5):
+def quick_colour(I, a, s=1.0, erode=2, spread=1.5, near=24, far=40):
     """v15 quick: the subject's own colour F in the soft edge, one frame, linear light.
 
     The edge band is everything outside the solid inside (alpha >= 0.98, eroded by `erode` px at 1080p): LTX
@@ -527,7 +527,12 @@ def quick_colour(I, a, s=1.0, erode=2, spread=1.5):
     (chroma) comes from the solid inside, pushed outward (EdgeExtend), and the brightness comes from Blur-Fusion
     (Forte, ICIP 2021; r = 90 then 6 at 1080p; s = frame width / 1920) so strand and fabric texture stays,
     clamped to the inside's local brightness range (mean +- spread x std) so a white sky or a dark background
-    cannot leak in as brightness. The solid inside is the plate exactly."""
+    cannot leak in as brightness. The solid inside is the plate exactly.
+
+    Only pixels near the real background (alpha < 0.05) are rebuilt: fully within `near` px (at 1080p), fading to
+    the plate by `far` px. LTX leaves fuzzy props (a bouquet) semi-solid deep inside the subject, where no
+    background shows through; rebuilding those smears them. Measured: hair edges lie within 20 to 32 px of the
+    background, bouquet interiors 50 px and more."""
     I = _f32(I)
     a = _f32(a)
     F, B = blur_fusion(I, a, max(1, round(90 * s)))
@@ -541,7 +546,10 @@ def quick_colour(I, a, s=1.0, erode=2, spread=1.5):
     sd = np.sqrt(np.maximum(st[..., 1] - st[..., 0] ** 2, 0))
     Lt = np.clip(F @ LUMA, st[..., 0] - spread * sd, st[..., 0] + spread * sd)
     out = np.clip(Fe * (Lt / np.maximum(Fe @ LUMA, 1e-4))[..., None], 0, 1)
-    return np.where(inner[..., None], I, out).astype(np.float32)
+    d = cv2.distanceTransform((a >= 0.05).astype(np.uint8), cv2.DIST_L2, 5) / max(s, 1e-3)
+    wt = (1 - _smoothstep(near, far, d))[..., None]
+    out = wt * out + (1 - wt) * I
+    return np.where(inner[..., None] | (wt == 0), I, out).astype(np.float32)
 
 
 def _smoothstep(e0, e1, x):

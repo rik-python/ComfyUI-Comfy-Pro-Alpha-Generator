@@ -128,7 +128,8 @@ outputs a **clean premultiplied comp**, saved next to the alpha as `rgba_` files
 - **Quick** works like an eroded EdgeExtend in Nuke: the colour comes from 2 px inside the subject and is pushed
   outward over the soft edge; the plate's brightness is kept for texture (stripes, strands), limited to the
   brightness range inside the subject so a white sky can't leak in. LTX edges often run a pixel wide, so even
-  "solid" alpha there still holds background; quick cleans that rim too.
+  "solid" alpha there still holds background; quick cleans that rim too. Only pixels near the real background
+  are rebuilt: fuzzy props LTX leaves semi-solid deep inside the subject (a bouquet) keep the plate colour.
 - **Perfect** also runs LTX-2.5 **Clean Plate**, which removes the people and rebuilds the background behind them,
   then subtracts that background from the edge (`F = (I - (1 - a) B) / a`). It is checked against the real plate
   and falls back to quick wherever the clean plate can't be trusted: next to other people, and on shots where the
