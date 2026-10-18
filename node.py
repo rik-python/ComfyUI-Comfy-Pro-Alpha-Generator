@@ -129,6 +129,54 @@ def _vitmatte_options():
     return found + ["auto-download"]
 
 
+def _ltx_chunks(g, stack, images, offset, count, starts, L, plan, attn=None, tile=None):
+    """One LTX alpha-gen pass over the processed range, chunked and cross-faded (Stitch).
+
+    stack: links of the shared LTX nodes (pos, neg, vae, latent, alat, model, lora_scale, noise, sampler, sigmas)
+    plus attn_grow / attn_blur / attn_strength. offset: index of the processed range's first frame inside `images`.
+    attn: a subject MASK over the processed range -> the guide's attention_mask (v13), so LTX mattes that subject on
+    the real plate (plus the parts it hides, which v13 subtracts again where others are in front).
+    tile: (x, y, w, h) of a native-resolution tile (v14): each chunk is cut from that window of `images` inside
+    the guide node, and the chunks are decoded and stitched in one node (RAM: no per-chunk images are cached)."""
+    chunks = {}
+    for i, s in enumerate(starts):
+        if tile is not None:  # v14: crop + guide fused, decode + stitch fused (no 1.2 GB chunk images cached)
+            x, y, tw, th = tile
+            guide = g.node("ComfyProAlpha_TileGuide", images=images, x=x, y=y, width=tw, height=th, start=offset + s,
+                           length=L, end=offset + count, positive=stack["pos"], negative=stack["neg"],
+                           vae=stack["vae"], latent=stack["latent"], latent_downscale_factor=stack["lora_scale"])
+            av = g.node("LTXVConcatAVLatent", video_latent=guide.out(2), audio_latent=stack["alat"])
+            guider = g.node("CFGGuider", model=stack["model"], positive=guide.out(0), negative=guide.out(1), cfg=1.0)
+            samp = g.node("SamplerCustomAdvanced", noise=stack["noise"], guider=guider.out(0),
+                          sampler=stack["sampler"], sigmas=stack["sigmas"], latent_image=av.out(0))
+            sep = g.node("LTXVSeparateAVLatent", av_latent=samp.out(0))
+            crop = g.node("LTXVCropGuides", positive=guide.out(0), negative=guide.out(1), latent=sep.out(0))
+            chunks[f"chunk_{i}"] = crop.out(2)
+            continue
+        img = g.node("ComfyProAlpha_ChunkPad", images=images, start=offset + s, length=L, end=offset + count)
+        kw = {}
+        if attn is not None:
+            am = g.node("ComfyProAlpha_AttnChunk", mask=attn, start=s, length=L, end=count, grow=stack["attn_grow"],
+                        blur=stack["attn_blur"])
+            kw = {"attention_strength": stack["attn_strength"], "attention_mask": am.out(0)}
+        guide = g.node("LTXAddVideoICLoRAGuideAdvanced" if attn is not None else "LTXAddVideoICLoRAGuide",
+                       positive=stack["pos"], negative=stack["neg"], vae=stack["vae"],
+                       latent=stack["latent"], image=img.out(0), frame_idx=0, strength=1.0,
+                       latent_downscale_factor=stack["lora_scale"], crop="disabled", use_tiled_encode=False,
+                       tile_size=256, tile_overlap=64, **kw)
+        av = g.node("LTXVConcatAVLatent", video_latent=guide.out(2), audio_latent=stack["alat"])
+        guider = g.node("CFGGuider", model=stack["model"], positive=guide.out(0), negative=guide.out(1), cfg=1.0)
+        samp = g.node("SamplerCustomAdvanced", noise=stack["noise"], guider=guider.out(0), sampler=stack["sampler"],
+                      sigmas=stack["sigmas"], latent_image=av.out(0))
+        sep = g.node("LTXVSeparateAVLatent", av_latent=samp.out(0))
+        crop = g.node("LTXVCropGuides", positive=guide.out(0), negative=guide.out(1), latent=sep.out(0))
+        dec = g.node("ComfyProAlpha_DecodeAlpha", samples=crop.out(2), vae=stack["vae"])
+        chunks[f"chunk_{i}"] = dec.out(0)
+    if tile is not None:
+        return g.node("ComfyProAlpha_DecodeStitch", plan=plan, vae=stack["vae"], **chunks).out(0)
+    return g.node("ComfyProAlpha_Stitch", plan=plan, **chunks).out(0)
+
+
 class ComfyProAlphaGenerator(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -145,8 +193,9 @@ class ComfyProAlphaGenerator(io.ComfyNode):
                     "The plate. Connect Load Video -> Get Video Components, Load Plate Sequence, or any crop/resize "
                     "chain. Then click 'Load plate' in the node. "
                     "Best quality at 1920x1088 (a 1920x1080 plate is padded to 1088 automatically): LTX alpha-gen is "
-                    "tuned for that size. Other sizes work, but edges can come out softer; for 4K, matte a 1080p "
-                    "proxy and scale the alpha up.")),
+                    "tuned for that size. Bigger plates (4K, DCI, 2K) are matted on a 1080p proxy, with the edges "
+                    "rendered again at native resolution (native-resolution edges). Smaller plates work, but edges "
+                    "can come out softer.")),
                 io.Float.Input("fps", default=24.0, min=1.0, max=240.0, step=0.001,
                                tooltip="Plate frame rate (connect Get Video Components / Load Plate Sequence fps)"),
                 io.Int.Input("first_frame", default=1, min=0, max=10**7,
@@ -216,6 +265,11 @@ class ComfyProAlphaGenerator(io.ComfyNode):
                     "selection get cut. Tested best: 90.")),
                 io.Int.Input("front_smoothing", optional=True, default=3, min=1, max=9, display_name="v13 front/back smoothing (frames)",
                              tooltip="Frames averaged so the in-front / behind decision never pops. 1 = off. Tested best: 3."),
+                io.Boolean.Input("native_edges", optional=True, default=True, display_name="native-resolution edges (v14)", tooltip=(
+                    "Plates bigger than 1920x1088: LTX also renders the subject's edges on native-resolution "
+                    "1920x1088 tiles, for strand-level detail at the plate's own size. Roughly 2-3x the render "
+                    "time on a 4K plate. Off: matte at 1080p and scale the alpha up (fast). Plates at 1080p or "
+                    "smaller are not affected.")),
             ],
             outputs=[io.Mask.Output("alpha"), io.Image.Output("comp")],
             hidden=[io.Hidden.unique_id, io.Hidden.dynprompt],
@@ -245,7 +299,7 @@ class ComfyProAlphaGenerator(io.ComfyNode):
                 video_vae, audio_vae, vitmatte, chunk, overlap, seed, erode, dilate, near_px, stabilize_radius,
                 sam3_threshold, fast_attention=True, overlap_mode=False, hair_guide=False,
                 v13_depth=True, hair_radius=4, attn_grow=20, attn_blur=10.0, attn_strength=1.0, occluder_reach=20,
-                limb_cap=90, front_smoothing=3):
+                limb_cap=90, front_smoothing=3, native_edges=True):
         p = json.loads(picks)
         n_video, H, W = images.shape[:3]
         ltx_model, alpha_lora, video_vae, audio_vae = (_resolve(w, v) for w, v in (
@@ -272,6 +326,12 @@ class ComfyProAlphaGenerator(io.ComfyNode):
         prefix = filename_prefix + ("_preview" if render == RENDER[1] else "")
 
         g = GraphBuilder()
+        native_src = None
+        if E.needs_proxy(W, H):  # v14: bigger than LTX's 1920x1088: matte a proxy, native tiles refine the edges
+            NW, NH = W, H
+            native_src = src
+            src = g.node("ComfyProAlpha_Proxy", images=native_src).out(0)
+            W, H = E.proxy_size(W, H)
         vid = g.node("ComfyProAlpha_LoadVideo", images=src, fps=fps)
         sam = g.node("LoadSAM3Model", precision="auto")
 
@@ -350,33 +410,15 @@ class ComfyProAlphaGenerator(io.ComfyNode):
         sigmas = g.node("ManualSigmas", sigmas=SIGMAS)
         plan = json.dumps({"n": count, "h": H, "w": W, "chunk": L, "starts": starts})
 
+        stack = {"pos": cond.out(0), "neg": cond.out(1), "vae": vae.out(0), "latent": latent.out(0),
+                 "alat": alat.out(0), "model": model, "lora_scale": lora.out(1), "noise": noise.out(0),
+                 "sampler": sampler.out(0), "sigmas": sigmas.out(0),
+                 "attn_grow": attn_grow, "attn_blur": attn_blur, "attn_strength": attn_strength}
+
         def ltx_pass(images, offset=0, attn=None):
             """offset: index of the processed range's first frame inside `images` (the upstream plate is read
-            directly at full precision; the isolated plate already starts at the range).
-            attn: a subject MASK over the processed range -> the guide's attention_mask (v13), so LTX mattes that
-            subject on the real plate (plus the parts it hides, which v13 subtracts again where others are in front)."""
-            chunks = {}
-            for i, s in enumerate(starts):
-                img = g.node("ComfyProAlpha_ChunkPad", images=images, start=offset + s, length=L, end=offset + count)
-                kw = {}
-                if attn is not None:
-                    am = g.node("ComfyProAlpha_AttnChunk", mask=attn, start=s, length=L, end=count, grow=attn_grow,
-                                blur=attn_blur)
-                    kw = {"attention_strength": attn_strength, "attention_mask": am.out(0)}
-                guide = g.node("LTXAddVideoICLoRAGuideAdvanced" if attn is not None else "LTXAddVideoICLoRAGuide",
-                               positive=cond.out(0), negative=cond.out(1), vae=vae.out(0),
-                               latent=latent.out(0), image=img.out(0), frame_idx=0, strength=1.0,
-                               latent_downscale_factor=lora.out(1), crop="disabled", use_tiled_encode=False,
-                               tile_size=256, tile_overlap=64, **kw)
-                av = g.node("LTXVConcatAVLatent", video_latent=guide.out(2), audio_latent=alat.out(0))
-                guider = g.node("CFGGuider", model=model, positive=guide.out(0), negative=guide.out(1), cfg=1.0)
-                samp = g.node("SamplerCustomAdvanced", noise=noise.out(0), guider=guider.out(0), sampler=sampler.out(0),
-                              sigmas=sigmas.out(0), latent_image=av.out(0))
-                sep = g.node("LTXVSeparateAVLatent", av_latent=samp.out(0))
-                crop = g.node("LTXVCropGuides", positive=guide.out(0), negative=guide.out(1), latent=sep.out(0))
-                dec = g.node("ComfyProAlpha_DecodeAlpha", samples=crop.out(2), vae=vae.out(0))
-                chunks[f"chunk_{i}"] = dec.out(0)
-            return g.node("ComfyProAlpha_Stitch", plan=plan, **chunks).out(0)
+            directly at full precision; the isolated plate already starts at the range)."""
+            return _ltx_chunks(g, stack, images, offset, count, starts, L, plan, attn)
 
         ltx = ltx_pass(src, offset=start)  # full-precision upstream frames, no copy
         final_kw = {}
@@ -394,6 +436,17 @@ class ComfyProAlphaGenerator(io.ComfyNode):
             iso = g.node("ComfyProAlpha_Isolate", plate=src, start=start, selection=sel, others=others,
                          grow=6, blur=6.0)
             final_kw["ltx_isolated"] = ltx_pass(iso.out(0))
+        if native_src is not None:
+            final_kw.update(native_plate=native_src, native_start=start)
+            if native_edges:
+                config = {"W": NW, "H": NH, "start": start, "count": count, "L": L, "starts": starts,
+                          "links": {"selection": sel, "others": others, "plate": native_src,
+                                    "stack": {k: v for k, v in stack.items() if not k.startswith("attn")}}}
+                edges = g.node("ComfyProAlpha_NativeEdges", selection=sel, config=json.dumps(config), plate=native_src,
+                               others=others, model=stack["model"], positive=stack["pos"], negative=stack["neg"],
+                               vae=stack["vae"], audio_latent=stack["alat"], lora_scale=stack["lora_scale"],
+                               noise=stack["noise"], sampler=stack["sampler"], sigmas=stack["sigmas"])
+                final_kw.update(tiles=edges.out(0), coverage=edges.out(1), tile_count=edges.out(2))
         final = g.node("ComfyProAlpha_Final", plate=plate.out(0), ltx=ltx, selection=sel, refined=refined,
                        others=others, near_px=near_px, filename_prefix=prefix, format=format,
                        first_frame=first_frame + start, save=True, qc=True, comp=comp_wired, **final_kw)

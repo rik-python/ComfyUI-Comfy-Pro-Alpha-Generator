@@ -13,7 +13,7 @@ import { api } from "../../scripts/api.js";
 const NODE = "ComfyProAlphaGenerator";
 const LEGACY = "SelectiveMatte";  // old node id: workflows saved before the rename
 const TITLE = "Comfy Pro Alpha Generator";
-const VERSION = "0.3.0";
+const VERSION = "0.4.0";
 const ADVANCED = ["text_encoder", "chunk", "overlap", "fast_attention",
     "seed", "control_after_generate", "erode", "dilate", "near_px", "stabilize_radius", "sam3_threshold"];
 const HIDDEN = ["picks", "render"];
@@ -465,6 +465,11 @@ class Picker {
             (advanced ? showWidget : hideWidget)(this.w[n]);
             grey(this.w[n], !v13);
         });
+        // v14: only plates bigger than 1920x1088 have native-resolution edges to render (unknown size: active)
+        const iw = this.info?.width, ih = this.info?.height;
+        const [bw, bh] = ih > iw ? [1088, 1920] : [1920, 1088];  // LTX's frame in the plate's orientation
+        const big = !iw || iw > bw || ih > bh;
+        grey(this.w.native_edges, !big);
         this.fitNode();
     }
 
@@ -506,6 +511,7 @@ class Picker {
             }), "pp", "comfy_pro_alpha_plate");
             const changed = this.picks.view && this.picks.view.fingerprint !== info.fingerprint;
             this.info = info;
+            this.syncQuality();  // native_edges greys out for plates of 1920x1088 or smaller
             this.picks.view = info;
             if (changed && this.picks.target) {
                 this.picks.stale = true;  // plate changed (crop/resize/new clip) after picking

@@ -3,6 +3,8 @@
 Pure numpy / OpenCV / torch, no ComfyUI node code. Masks are float32 arrays [N,H,W] in 0-1, plates are uint8
 or float arrays [N,H,W,3]. Function names and defaults match the CLI scripts so results stay comparable.
 """
+import math
+
 import cv2
 import numpy as np
 
@@ -330,6 +332,129 @@ def chunk_weight(i, starts, chunk, k):
 def ltx_frames(n):
     """Largest valid LTX length (8k+1) <= n."""
     return max(1, (n - 1) // 8 * 8 + 1)
+
+
+# ---------------------------------------------------------------- v14 native-resolution edges (v14_tile_spike.py)
+# A plate bigger than LTX's native 1920x1088 is matted on a proxy that fits inside it. Native-resolution LTX tiles
+# then supply the edges: the proxy result keeps the subject's core and every decision, the tiles add strands.
+
+TILE_W, TILE_H = 1920, 1088
+
+
+def _box(w, h):
+    """LTX's native frame in the plate's orientation: 1920x1088, or 1088x1920 for portrait plates (v0.3.0 ran a
+    vertical 1080p plate directly at 1088x1920)."""
+    return (TILE_W, TILE_H) if w >= h else (TILE_H, TILE_W)
+
+
+def needs_proxy(w, h):
+    bw, bh = _box(w, h)
+    return w > bw or h > bh
+
+
+def proxy_size(w, h, max_w=None, max_h=None):
+    """Largest even size with the plate's aspect that fits inside max_w x max_h (default: LTX's frame in the
+    plate's orientation), never larger than the plate."""
+    if max_w is None:
+        max_w, max_h = _box(w, h)
+    scale = min(max_w / w, max_h / h, 1.0)
+    return max(2, int(w * scale) // 2 * 2), max(2, int(h * scale) // 2 * 2)
+
+
+def grid_axis(n, t):
+    """Tile start positions along one axis: >= 50% overlap, first at 0, last flush with the plate edge."""
+    if n <= t:
+        return [0]
+    k = math.ceil((n - t) / (t / 2)) + 1
+    return [round(i * (n - t) / (k - 1)) for i in range(k)]
+
+
+def tile_grid(w, h, tw=None, th=None):
+    """(x, y, tile_w, tile_h) for every tile, rows top to bottom; tiles follow the plate's orientation; a plate
+    axis shorter than a tile gets one tile of the plate's size there (LTX pads it)."""
+    if tw is None:
+        tw, th = _box(w, h)
+    xs, ys = grid_axis(w, tw), grid_axis(h, th)
+    return [(x, y, min(tw, w), min(th, h)) for y in ys for x in xs]
+
+
+def select_tiles(sel, grid, native_wh, band=30):
+    """Indices of the tiles that touch the subject's edge band (+-band proxy px around the selection's outline)
+    on any frame. sel: proxy selection [n, ph, pw]."""
+    n, ph, pw = sel.shape
+    W, H = native_wh
+    k = ellipse(band)
+    edge = np.zeros((ph, pw), bool)
+    for f in range(n):
+        s = (_f32(sel[f]) > .5).astype(np.uint8)
+        if s.any():
+            edge |= cv2.dilate(s, k).astype(bool) & ~cv2.erode(s, k).astype(bool)
+    sx, sy = pw / W, ph / H
+    return [i for i, (x, y, tw, th) in enumerate(grid)
+            if edge[int(y * sy):math.ceil((y + th) * sy), int(x * sx):math.ceil((x + tw) * sx)].any()]
+
+
+def _ramp(n, lo, hi):
+    """1-D blend weight: cosine rise over `lo` px at the start, fall over `hi` px at the end, 1 elsewhere."""
+    r = np.ones(n, np.float32)
+    for ov, sl in ((lo, slice(0, lo)), (hi, slice(n - hi, n))):
+        if ov > 0:
+            t = (0.5 - 0.5 * np.cos(np.pi * (np.arange(ov) + 0.5) / ov)).astype(np.float32)
+            r[sl] = np.minimum(r[sl], t if sl.start == 0 else t[::-1])
+    return r
+
+
+def tile_feather(grid, idx, native_wh):
+    """Stitch weight of tile `idx`: ramps only where it overlaps a neighbour (over half the overlap), flat at
+    the plate border."""
+    x, y, tw, th = grid[idx]
+    xs, ys = sorted({g[0] for g in grid}), sorted({g[1] for g in grid})
+    i, j = xs.index(x), ys.index(y)
+    left = (xs[i - 1] + tw - x) // 2 if i > 0 else 0
+    right = (x + tw - xs[i + 1]) // 2 if i < len(xs) - 1 else 0
+    top = (ys[j - 1] + th - y) // 2 if j > 0 else 0
+    bottom = (y + th - ys[j + 1]) // 2 if j < len(ys) - 1 else 0
+    return np.outer(_ramp(th, top, bottom), _ramp(tw, left, right))
+
+
+def stitch_tiles(frames, grid, used, native_wh, feathers):
+    """One frame: feather-blend the rendered tiles (`frames[i]` is tile `used[i]`, tile-sized) into the native
+    frame. coverage = rendered weight / whole-grid weight, so it fades out where a rendered tile overlaps one that
+    was not rendered (no step at that tile border). feathers: tile_feather for every grid tile."""
+    W, H = native_wh
+    acc = np.zeros((H, W), np.float32)
+    wsum = np.zeros((H, W), np.float32)
+    for a, i in zip(frames, used):
+        x, y, tw, th = grid[i]
+        acc[y:y + th, x:x + tw] += _f32(a)[:th, :tw] * feathers[i]
+        wsum[y:y + th, x:x + tw] += feathers[i]
+    if not used:
+        return acc, wsum
+    full = np.zeros((H, W), np.float32)
+    for (x, y, tw, th), f in zip(grid, feathers):
+        full[y:y + th, x:x + tw] += f
+    return acc / np.maximum(wsum, 1e-6), np.clip(wsum / full, 0, 1)
+
+
+def merge_native(base, tiles, coverage, s, others=None):
+    """One frame of "edges from tiles". base: proxy alpha scaled up to native (0..1); tiles: stitched tile alpha;
+    coverage: 0..1, 0 where no tile; s = native / proxy width; others: the other subjects' mask at native size.
+    The proxy keeps the solid core, everything near other people (a tile only sees part of the frame and decides
+    worse there: v13 crossings, leaks onto a neighbour) and wherever the tiles disagree over an area; elsewhere the
+    tiles' native strands are used. Constants tuned at 4K (s = 2)."""
+    k = s / 2
+    b, t = _f32(base), _f32(tiles)
+    core = cv2.erode((b > .98).astype(np.uint8), ellipse(max(1, round(6 * k)))).astype(np.float32)
+    core = cv2.GaussianBlur(core, (0, 0), 3 * k)
+    trust = np.clip((0.35 - cv2.GaussianBlur(np.abs(t - b), (0, 0), 12 * k)) / 0.2, 0, 1) * _f32(coverage)
+    # tiles only refine edges near the subject: a faint haze a tile leaves on someone else, far from the proxy's
+    # matte, "agrees" with base 0 closely enough to pass the trust test otherwise (seen on plate b's denim jacket)
+    near = cv2.dilate((b > .02).astype(np.uint8), ellipse(max(1, round(20 * k)))).astype(np.float32)
+    trust *= cv2.GaussianBlur(near, (0, 0), 4 * k)
+    if others is not None:
+        near_o = cv2.dilate((_f32(others) > .5).astype(np.uint8), ellipse(max(1, round(24 * k)))).astype(np.float32)
+        trust *= 1 - cv2.GaussianBlur(near_o, (0, 0), 4 * k)
+    return np.clip(core * b + (1 - core) * (trust * t + (1 - trust) * b), 0, 1)
 
 
 # ---------------------------------------------------------------- QC (measure_matte.py)

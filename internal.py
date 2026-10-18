@@ -20,9 +20,9 @@ from . import _video as V
 CAT = "Comfy Compositing/internal"
 
 
-def _schema(node_id, inputs, outputs, output_node=False):
+def _schema(node_id, inputs, outputs, output_node=False, **kw):
     return io.Schema(node_id=node_id, display_name=node_id.replace("ComfyProAlpha_", "CPA "), category=CAT,
-                     inputs=inputs, outputs=outputs, is_deprecated=True, is_output_node=output_node)
+                     inputs=inputs, outputs=outputs, is_deprecated=True, is_output_node=output_node, **kw)
 
 
 def _np(t):
@@ -354,15 +354,19 @@ class ChunkPad(io.ComfyNode):
     @classmethod
     def execute(cls, images, start, length, end=-1):
         stop = start + length if end < 0 else min(start + length, end)  # never past the processed range
-        c = images[start:stop]
-        c = c.float() / 255.0 if c.dtype == torch.uint8 else c.float().clamp(0, 1)
-        if c.shape[0] < length:
-            c = torch.cat([c, c[-1:].repeat(length - c.shape[0], 1, 1, 1)])
-        h, w = c.shape[1:3]
-        ph, pw = (-h) % 32, (-w) % 32
-        if ph or pw:
-            c = torch.nn.functional.pad(c.permute(0, 3, 1, 2), (0, pw, 0, ph), mode="replicate").permute(0, 2, 3, 1)
-        return io.NodeOutput(c)
+        return io.NodeOutput(_pad_chunk(images[start:stop], length))
+
+
+def _pad_chunk(c, length):
+    """Float 0-1, length padded to `length` (repeat last frame), H/W padded to a multiple of 32 (replicate edge)."""
+    c = c.float() / 255.0 if c.dtype == torch.uint8 else c.float().clamp(0, 1)
+    if c.shape[0] < length:
+        c = torch.cat([c, c[-1:].repeat(length - c.shape[0], 1, 1, 1)])
+    h, w = c.shape[1:3]
+    ph, pw = (-h) % 32, (-w) % 32
+    if ph or pw:
+        c = torch.nn.functional.pad(c.permute(0, 3, 1, 2), (0, pw, 0, ph), mode="replicate").permute(0, 2, 3, 1)
+    return c
 
 
 class AttnChunk(io.ComfyNode):
@@ -432,7 +436,210 @@ class Stitch(io.ComfyNode):
         return io.NodeOutput((acc / wsum).clamp(0, 1).half())
 
 
+# ------------------------------------------------------------------ v14 native-resolution edges
+
+class Proxy(io.ComfyNode):
+    """v14: the plate scaled to fit inside 1920x1088 (area filter, float32 like the upstream frames): the whole
+    pipeline runs on it, the native-resolution tiles only refine the edges."""
+
+    @classmethod
+    def define_schema(cls):
+        return _schema("ComfyProAlpha_Proxy", [io.Image.Input("images")], [io.Image.Output("proxy")])
+
+    @classmethod
+    def execute(cls, images):
+        import cv2
+
+        n, h, w = images.shape[:3]
+        pw, ph = E.proxy_size(w, h)
+        out = torch.empty((n, ph, pw, images.shape[3]), dtype=torch.float32)
+        for i in range(0, n, 16):  # in slices: no full float32 copy of the native batch
+            for j, fr in enumerate(images[i:i + 16].float().clamp(0, 1).cpu().numpy()):
+                out[i + j] = torch.from_numpy(cv2.resize(fr, (pw, ph), interpolation=cv2.INTER_AREA))
+        return io.NodeOutput(out)
+
+
+class NativeIsolate(io.ComfyNode):
+    """v14: the native plate with every other subject painted out, the proxy masks scaled up frame by frame
+    (fused: no native-resolution mask stacks are cached). uint8, like Isolate."""
+
+    @classmethod
+    def define_schema(cls):
+        return _schema("ComfyProAlpha_NativeIsolate", [
+            io.Image.Input("plate"), io.Mask.Input("selection"), io.Mask.Input("others"),
+            io.Int.Input("grow", default=12), io.Float.Input("blur", default=12.0), io.Int.Input("start", default=0),
+        ], [io.Image.Output("isolated")])
+
+    @classmethod
+    def execute(cls, plate, selection, others, grow, blur, start=0):
+        import cv2
+
+        sel, oth = _h(selection), _h(others)
+        n, (H, W) = sel.shape[0], plate.shape[1:3]
+        out = np.empty((n, H, W, plate.shape[3]), np.uint8)
+        pbar = comfy.utils.ProgressBar(n)
+        for f in range(n):
+            fr = plate[start + f]
+            rgb = fr.cpu().numpy().astype(np.float32) if fr.dtype == torch.uint8 else fr.float().clamp(0, 1).cpu().numpy() * 255.0
+            up = lambda m: cv2.resize(E._f32(m), (W, H), interpolation=cv2.INTER_LINEAR)
+            iso = E.isolate_frame(rgb, up(sel[f]), up(oth[f]), grow, blur)
+            out[f] = np.clip(iso, 0, 255).round().astype(np.uint8)
+            pbar.update(1)
+        return io.NodeOutput(torch.from_numpy(out))
+
+
+class TileGuide(io.ComfyNode):
+    """v14: one LTX chunk of one native-resolution tile as the IC-LoRA guide (LTXAddVideoICLoRAGuide, same
+    settings as the 1080p passes). Fused: the float32 tile chunk (about 1.2 GB) is never a cached output."""
+
+    @classmethod
+    def define_schema(cls):
+        return _schema("ComfyProAlpha_TileGuide", [
+            io.Image.Input("images"), io.Int.Input("x", default=0), io.Int.Input("y", default=0),
+            io.Int.Input("width", default=1920), io.Int.Input("height", default=1088),
+            io.Int.Input("start", default=0), io.Int.Input("length", default=49), io.Int.Input("end", default=-1),
+            io.Conditioning.Input("positive"), io.Conditioning.Input("negative"), io.Vae.Input("vae"),
+            io.Latent.Input("latent"), io.Float.Input("latent_downscale_factor", default=1.0),
+        ], [io.Conditioning.Output("positive"), io.Conditioning.Output("negative"), io.Latent.Output("latent")])
+
+    @classmethod
+    def execute(cls, images, x, y, width, height, start, length, end, positive, negative, vae, latent,
+                latent_downscale_factor):
+        import nodes
+
+        stop = start + length if end < 0 else min(start + length, end)
+        img = _pad_chunk(images[start:stop, y:y + height, x:x + width], length)
+        guide = nodes.NODE_CLASS_MAPPINGS["LTXAddVideoICLoRAGuide"]
+        out = guide.execute(positive=positive, negative=negative, vae=vae, latent=latent, image=img, frame_idx=0,
+                            strength=1.0, latent_downscale_factor=latent_downscale_factor, crop="disabled",
+                            use_tiled_encode=False, tile_size=256, tile_overlap=64)
+        return io.NodeOutput(*out.result)
+
+
+class DecodeStitch(io.ComfyNode):
+    """v14: decode a tile's LTX chunks one at a time and cross-fade them (DecodeAlpha + Stitch fused: no decoded
+    chunk is a cached output)."""
+    MAX = 24
+
+    @classmethod
+    def define_schema(cls):
+        return _schema("ComfyProAlpha_DecodeStitch",
+                       [io.String.Input("plan"), io.Vae.Input("vae")]
+                       + [io.Latent.Input(f"chunk_{i}", optional=True) for i in range(cls.MAX)],
+                       [io.Mask.Output("alpha")])
+
+    @classmethod
+    def execute(cls, plan, vae, **chunks):
+        import nodes
+
+        p = json.loads(plan)
+        n, h, w, L, starts = p["n"], p["h"], p["w"], p["chunk"], p["starts"]
+        acc = torch.zeros(n, h, w)
+        wsum = torch.zeros(n, 1, 1)
+        for i, s in enumerate(starts):
+            img = nodes.VAEDecodeTiled().decode(vae, chunks[f"chunk_{i}"], 512, 64, 64, 8)[0]
+            img = img.float().mean(-1).half().cpu()[:, :h, :w].float()  # as DecodeAlpha -> Stitch
+            for k in range(min(L, n - s)):
+                wt = E.chunk_weight(i, starts, L, k)
+                acc[s + k] += img[k] * wt
+                wsum[s + k] += wt
+            del img
+        return io.NodeOutput((acc / wsum).clamp(0, 1).half())
+
+
+class TileMerge(io.ComfyNode):
+    """v14: feather-blend the rendered tiles into native-resolution frames, plus where they cover the plate."""
+    MAX = 64
+
+    @classmethod
+    def define_schema(cls):
+        return _schema("ComfyProAlpha_TileMerge",
+                       [io.String.Input("plan")] + [io.Mask.Input(f"tile_{i}", optional=True) for i in range(cls.MAX)],
+                       [io.Mask.Output("tiles"), io.Mask.Output("coverage")])
+
+    @classmethod
+    def execute(cls, plan, **tiles):
+        p = json.loads(plan)
+        n, W, H, grid, used = p["n"], p["W"], p["H"], [tuple(g) for g in p["grid"]], p["used"]
+        feathers = [E.tile_feather(grid, i, (W, H)) for i in range(len(grid))]
+        src = [_h(tiles[f"tile_{k}"]) for k in range(len(used))]
+        alpha = np.zeros((n, H, W), np.float16)
+        cover = np.zeros((n, H, W), np.float16)
+        for f in range(n):
+            alpha[f], cover[f] = E.stitch_tiles([t[f] for t in src], grid, used, (W, H), feathers)
+        return io.NodeOutput(_half(alpha), _half(cover))
+
+
+class NativeEdges(io.ComfyNode):
+    """v14: once the proxy selection exists, render one isolated LTX pass per native-resolution tile that touches
+    the subject's edge (others painted out at native resolution), then feather the tiles together.
+    Expands at run time: which tiles are needed is only known after SAM3 has tracked the subject."""
+
+    @classmethod
+    def define_schema(cls):
+        # Everything the tiles depend on is a real input, even though only the links (in `config`) are used: ComfyUI
+        # keys its cache on real inputs, so a new seed, model, LoRA, VAE, encoder or fps must re-render the tiles.
+        deps = [io.Image.Input("plate", optional=True), io.Mask.Input("others", optional=True),
+                io.Model.Input("model", optional=True), io.Conditioning.Input("positive", optional=True),
+                io.Conditioning.Input("negative", optional=True), io.Vae.Input("vae", optional=True),
+                io.Latent.Input("audio_latent", optional=True), io.Float.Input("lora_scale", optional=True),
+                io.Noise.Input("noise", optional=True), io.Sampler.Input("sampler", optional=True),
+                io.Sigmas.Input("sigmas", optional=True)]
+        return _schema("ComfyProAlpha_NativeEdges", [io.Mask.Input("selection"), io.String.Input("config")] + deps,
+                       [io.Mask.Output("tiles"), io.Mask.Output("coverage"), io.Int.Output("count")],
+                       enable_expand=True)
+
+    @classmethod
+    def execute(cls, selection, config, **deps):
+        from comfy_execution.graph_utils import GraphBuilder
+
+        from .node import _ltx_chunks
+
+        c = json.loads(config)
+        W, H, count, start, L, starts, lk = c["W"], c["H"], c["count"], c["start"], c["L"], c["starts"], c["links"]
+        sel = _h(selection)
+        grid = E.tile_grid(W, H)
+        used = E.select_tiles(sel, grid, (W, H))
+        print(f"[ComfyProAlpha] native edges: {len(used)} of {len(grid)} tiles at {W}x{H}")
+        if not used:  # SAM3 lost the subject in the whole range: Final keeps the scaled-up proxy alpha
+            z = torch.zeros((count, H, W), dtype=torch.float16)
+            return io.NodeOutput(z, z, 0)
+        s = W / sel.shape[2]
+        g = GraphBuilder()
+        iso = g.node("ComfyProAlpha_NativeIsolate", plate=lk["plate"], start=start, selection=lk["selection"],
+                     others=lk["others"], grow=round(6 * s), blur=6.0 * s)
+        tiles = {}
+        for k, i in enumerate(used):
+            x, y, tw, th = grid[i]
+            lat = g.node("EmptyLTXVLatentVideo", width=tw + (-tw) % 32, height=th + (-th) % 32, length=L, batch_size=1)
+            plan = json.dumps({"n": count, "h": th, "w": tw, "chunk": L, "starts": starts})
+            tiles[f"tile_{k}"] = _ltx_chunks(g, {**lk["stack"], "latent": lat.out(0)}, iso.out(0), 0, count, starts, L,
+                                             plan, tile=(x, y, tw, th))
+        merge = g.node("ComfyProAlpha_TileMerge", plan=json.dumps({"n": count, "W": W, "H": H, "grid": grid,
+                                                                   "used": used}), **tiles)
+        return io.NodeOutput(merge.out(0), merge.out(1), len(used), expand=g.finalize())
+
+
 # ------------------------------------------------------------------ final
+
+def _native_alpha(alpha, native_hw, tiles, coverage, others):
+    """v14: the proxy alpha scaled up to the plate's native size; with tiles, their edges merged in away from the
+    other subjects (float16). others: the proxy's others mask."""
+    import cv2
+
+    H, W = native_hw
+    n, _, pw = alpha.shape
+    T = _h(tiles) if tiles is not None else None
+    C = _h(coverage) if coverage is not None else None
+    out = np.empty((n, H, W), np.float16)
+    for f in range(n):
+        a = np.clip(cv2.resize(alpha[f], (W, H), interpolation=cv2.INTER_CUBIC), 0, 1)
+        if T is not None:
+            o = cv2.resize(E._f32(others[f]), (W, H), interpolation=cv2.INTER_LINEAR)
+            a = E.merge_native(a, T[f], C[f], W / pw, o)
+        out[f] = a
+    return out
+
 
 def _save(alpha, prefix, fmt, first_frame):
     import cv2
@@ -442,6 +649,7 @@ def _save(alpha, prefix, fmt, first_frame):
     if fmt == "exr":
         os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
     for i, a in enumerate(alpha):
+        a = E._f32(a)  # v14 native frames are float16: 65535 overflows it
         path = os.path.join(out_dir, f"alpha_{first_frame + i:05d}.{'exr' if fmt == 'exr' else 'png'}")
         if fmt == "exr":
             ok = cv2.imwrite(path, a.astype(np.float32), [cv2.IMWRITE_EXR_TYPE, cv2.IMWRITE_EXR_TYPE_HALF,
@@ -492,12 +700,16 @@ class Final(io.ComfyNode):
             io.Combo.Input("format", options=["png16", "exr"]), io.Int.Input("first_frame", default=1),
             io.Boolean.Input("save", default=True), io.Boolean.Input("qc", default=True),
             io.Boolean.Input("comp", default=True),
+            io.Image.Input("native_plate", optional=True), io.Int.Input("native_start", default=0, optional=True),
+            io.Mask.Input("tiles", optional=True), io.Mask.Input("coverage", optional=True),
+            io.Int.Input("tile_count", default=0, optional=True),
         ], [io.Mask.Output("alpha"), io.Image.Output("comp")], output_node=True)
 
     @classmethod
     def execute(cls, plate, ltx, selection, refined, others, near_px, filename_prefix, format, first_frame,
                 save, qc, comp=True, ltx_isolated=None, attn_target=None, attn_others=None, depth=None,
-                hair_guide=False, hair_radius=4, occluder_reach=20, limb_cap=90, front_smoothing=3):
+                hair_guide=False, hair_radius=4, occluder_reach=20, limb_cap=90, front_smoothing=3,
+                native_plate=None, native_start=0, tiles=None, coverage=None, tile_count=0):
         p = _rgb8(plate)
         L, S, R, O = _h(ltx), _h(selection), _h(refined), _h(others)
         I = _h(ltx_isolated) if ltx_isolated is not None else None
@@ -521,19 +733,29 @@ class Final(io.ComfyNode):
         alpha, cover = E.ltx_fallback(alpha, ltx_seen, S, R, out=alpha)
         np.clip(alpha, 0, 1, out=alpha)
 
-        out_dir = _save(alpha, filename_prefix, format, first_frame) if save else ""
-        score = E.qc(E.to_gray(p), S, L, alpha) if qc else {}
+        # v14: a plate bigger than 1920x1088 was matted on a proxy: the output is at the plate's own size
+        native = None if native_plate is None else _native_alpha(alpha, tuple(native_plate.shape[1:3]), tiles,
+                                                                  coverage, O)
+        out = alpha if native is None else native
+        out_dir = _save(out, filename_prefix, format, first_frame) if save else ""
+        score = E.qc(E.to_gray(p), S, L, alpha) if qc else {}  # QC on the proxy (as for any 1080p plate)
         if comp:  # only built when the node's comp output is wired (a full 1080p shot is several GB)
-            comp_t = torch.empty(p.shape, dtype=torch.float32)
+            comp_t = torch.empty(out.shape + (3,), dtype=torch.float32)
             for f in range(n):
-                a = alpha[f][..., None]
-                comp_t[f] = torch.from_numpy(p[f].astype(np.float32) / 255.0 * a + 0.5 * (1 - a))
+                a = E._f32(out[f])[..., None]
+                rgb = (p[f].astype(np.float32) / 255.0 if native is None else
+                       native_plate[native_start + f].float().clamp(0, 1).cpu().numpy())
+                comp_t[f] = torch.from_numpy(rgb * a + 0.5 * (1 - a))
         else:
             comp_t = torch.zeros(1, 64, 64, 3)
         info = {"mode": mode, "frames": n, "first_frame": first_frame, "out_dir": out_dir, "format": format,
                 "ltx_cover": float(np.mean(cover) * 100), **{k: float(v) for k, v in score.items()}}
+        if native is not None:
+            info.update(native=f"{native.shape[2]}x{native.shape[1]}", native_edges=tiles is not None,
+                        tiles=int(tile_count))
+        # previews stay proxy-sized (they are <= 960 px wide anyway)
         ui_out = {"pro_alpha": [info], "previews": _previews(p, alpha, max(1, n // 48))}
-        return io.NodeOutput(torch.from_numpy(alpha), comp_t, ui=ui_out)
+        return io.NodeOutput(torch.from_numpy(out), comp_t, ui=ui_out)
 
 
 # ------------------------------------------------------------------ detection report (for the picker UI)
@@ -595,4 +817,6 @@ class PartReport(io.ComfyNode):
                                                           "mask": {"filename": name, "subfolder": sub, "type": "temp"}}]})
 
 
-NODES = [Plate, LoadVideo, Frame, PlateProxy, TrackMasks, MaskMax, EmptyPrompt, Refine, Isolate, Depth, ChunkPad, AttnChunk, DecodeAlpha, Stitch, Final, DetectReport, PartReport]
+NODES = [Plate, LoadVideo, Frame, PlateProxy, TrackMasks, MaskMax, EmptyPrompt, Refine, Isolate, Depth, ChunkPad, AttnChunk,
+         DecodeAlpha, Stitch, Proxy, NativeIsolate, TileGuide, DecodeStitch, TileMerge, NativeEdges, Final,
+         DetectReport, PartReport]

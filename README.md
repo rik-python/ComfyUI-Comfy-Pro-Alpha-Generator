@@ -85,6 +85,29 @@ smooth and has no strands left to move. That's the trade. I'll take a little mor
 
 </details>
 
+### True 4K strand detail (v14)
+
+<p align="center"><img src="docs/images/wipe_native.gif" width="540" alt="wipe: 1080p matte scaled up vs native 4K edges"></p>
+
+<sub>UHD 4K plate, matte over navy. Left of the line: the 1080p matte scaled up to 4K. Right: native 4K edges.
+More single strands, each thinner, and no grass baked into them.</sub>
+
+Plates bigger than 1920x1088 are now matted at their own resolution. The node mattes a 1080p proxy exactly as before
+(that pass decides what the subject is), then runs LTX alpha-gen again on native-resolution 1920x1088 tiles along the
+subject's edge and merges them in. Fine hair, flyaways and fur keep single 4K strands instead of a soft 1080p band
+scaled up. Tested on UHD 4K (3840x2160), DCI 4K (4096x2160) and 2K (2048x1080) plates.
+
+| UHD 4K plate, long fine hair, RTX 5090 | 1080p scaled up (switch off) | **Native 4K edges** (on, default) |
+|---|:---:|:---:|
+| Edge flicker, frame to frame (lower = steadier) | 183 | **177** |
+| Holes inside the subject | 0% | 0% |
+| 49-frame preview | about 4 min, 20 GB RAM | about 9 min, 24 GB RAM |
+| 242-frame shot | 19 min, 73 GB RAM | 58 min, 97 GB RAM |
+
+It helps most on single strands, flyaways and fur against the background. Thick hair (braids) gains little. Where the
+subject touches another person, the 1080p result is kept on purpose: a tile only sees part of the frame and decides
+worse there. RAM grows with shot length (see [Hardware](#hardware)).
+
 ### Any subject
 
 <p align="center"><img src="docs/images/any_subject.jpg" width="900" alt="dog, motorbike, kid"></p>
@@ -139,6 +162,13 @@ the real plate and steers LTX with each SAM3 mask (the IC-LoRA guide's attention
 one for everyone else, then subtracts the others wherever SAM3 and a depth pass say they are in front. Their
 fingers and curls get a generative edge too. Details in the [Settings guide](#settings-guide).
 
+**Native-resolution edges (v14)** handle plates bigger than 1920x1088. Everything above runs on a 1080p proxy of the
+plate. Then the plate is cut into native-resolution 1920x1088 tiles (half-overlapping), and only the tiles that touch
+the subject's edge get their own LTX pass, with the other subjects painted out at full resolution. The merge keeps the
+proxy result inside the subject, near other people, and wherever a tile disagrees with it over an area (a tile only
+sees part of the subject, so its big decisions are worse); everywhere else the tiles supply the strands. Which tiles
+are needed is only known once SAM3 has tracked the subject, so that stage expands into its LTX passes at run time.
+
 <details>
 <summary><b>Engineering notes</b></summary>
 
@@ -178,7 +208,8 @@ The node walks you through three steps (**Plate → Subject → Render**) and on
    the plate's numbers: `plate.1001` gives `alpha_01001`.
 
    Any nodes can sit in between (crop, resize, colour). **Best quality at 1920x1088** (1920x1080 is padded
-   automatically): LTX alpha-gen is tuned for that size. For 4K plates, matte a 1080p proxy and scale the alpha up.
+   automatically): LTX alpha-gen is tuned for that size. Bigger plates (4K, DCI, 2K) need nothing extra: the node
+   mattes a 1080p proxy and renders the edges again at native resolution ([True 4K strand detail](#true-4k-strand-detail-v14)).
 
 2. **Plate.** Click the big **Load plate** button. It runs the nodes feeding `images` and fills the scrubber.
 3. **Subject.** Scrub to a frame where the subject is fully visible and **click it**. It turns orange; every other
@@ -244,6 +275,7 @@ each stage is cached, so changing a late setting (format, the v13 options, tempo
 | Someone's hand, arm or hair **crosses in front of** the subject | **handle overlapping people (v13)** | Their fingers and curls get their own generative edge instead of a soft ViTMatte line. |
 | The subject's arm is around someone, hands on shoulders, a hug | **v13**, plus an **add** click on the hand (see below) | v13 keeps the arm crisp over the other person. |
 | A crowd behind the subject, nobody crossing them | **Best (v12)** | v13 costs a third LTX pass and only helps where people overlap. |
+| A plate bigger than 1080p (4K, DCI, 2K) with fine hair, fur or flyaways | any mode, **native-resolution edges** on (default) | The strands are rendered at the plate's own resolution. Switch it off for a quick pass: the 1080p matte scaled up, 2 to 3x faster. |
 
 ### Overlap mode (v13)
 
@@ -317,16 +349,25 @@ change them only to fix a specific problem:
 | A faint extra arm or blob next to the subject | A limb LTX invented. | Lower **invented-limb cap** to 60. |
 | An overlap edge pops between frames | The front/behind decision flips. | **Front/back smoothing** to 5. |
 
+**When something is wrong on a 4K plate:**
+
+| You see | Cause | Fix |
+|---|---|---|
+| ComfyUI runs out of RAM on a long 4K shot | Every 4K frame is held in memory (97 GB at 242 frames with native edges, 73 GB without). | Split the shot into runs of about 100 frames (`first` / `last` on Load Plate Sequence, or trim the video), disconnect the node's `comp` output, or switch native edges off. |
+| Edges against another person look 1080p-soft | By design: near other people the proxy result is kept. | Nothing to fix; those edges come from the proxy pass. |
+| Thick hair looks the same on and off | Its edge is already resolved at 1080p. | Switch native edges off on that shot to save time. |
+
 ### All other settings
 
 **Main**
 
 | Setting | Default | What it does | When to change it |
 |---|:---:|---|---|
-| `images` | | The plate. Any chain works (crop, resize, colour). | Feed 1920x1088 or 1920x1080 for the best edges. For 4K, feed a 1080p proxy and scale the alpha up. |
+| `images` | | The plate. Any chain works (crop, resize, colour). | Feed the plate at its own resolution. Up to 1920x1088 it is matted directly; bigger plates are matted on a 1080p proxy with native-resolution edges. Don't downscale a 4K plate yourself. |
 | `fps` | 24 | Plate frame rate, passed to LTX. | Wire it from Get Video Components or Load Plate Sequence. Set it by hand only for loose images. |
 | `first_frame` | 1 | Frame number of the first image; output files use it. | **1001** (or your plate's start) for VFX numbering. Load Plate Sequence sets it for you. |
 | `quality` | Best (v12) | 2 LTX passes (Best) or 1 (Fast). Greyed out in v13. | Fast for look-dev and triage, Best for finals. |
+| `native-resolution edges (v14)` | on | Plates bigger than 1920x1088: LTX renders the subject's edges again on native 1920x1088 tiles and merges them into the proxy matte. Works with every mode. Greyed out for plates of 1080p or less. | **Off** for a fast first look, or when RAM is short on a long 4K shot: the 1080p matte scaled up, 2 to 3x faster. Leave it **on** for finals with fine hair, fur or flyaways. |
 | `filename_prefix` | `comfy_pro_alpha/shot` | Output folder under `ComfyUI/output/`. | One per shot (`show/sh010_hero`) so renders don't overwrite each other. |
 | `format` | png16 | 16-bit PNG or half-float EXR. | **exr** for a Nuke/EXR pipeline. Both hold the full soft edge. |
 | model selectors | the recommended files | LTX model, alpha-gen IC-LoRA, video VAE (must be the **conv** VAE), audio VAE, ViTMatte. | Only to pick a GGUF (see [Hardware](#hardware)) or a file in another folder. `MISSING:` means the file isn't found. |
@@ -390,6 +431,19 @@ drives add `--fast-disk` to ComfyUI's launch arguments. The log line `Model stor
 <sub>Times from a fresh start, model loading included. The 16 GB test locked the rest of a 128 GB machine's RAM so the
 OS could not use it. A real 12 GB card is slower from compute, not memory. Long shots need more working memory and
 were not squeeze-tested.</sub>
+
+**4K plates need more RAM.** ComfyUI holds every frame of the plate in memory, and a 4K frame is four times a 1080p
+one. Measured on the RTX 5090 machine (disk streaming on), UHD 4K, Best:
+
+| 4K shot | Native edges off | Native edges on |
+|---|---|---|
+| 49-frame preview | 20 GB | 24 GB |
+| 242-frame shot | 73 GB | 97 GB |
+
+RAM grows with shot length. On a 64 GB machine, split long 4K shots into runs of about 100 frames (estimated from the
+two measurements), or preview first and render the full shot in parts. These numbers are with the node's `comp` output
+unconnected: wiring `comp` on a 4K plate adds about 0.1 GB per frame (24 GB on the 242-frame shot; computed from the
+frame size, not measured). The alpha files on disk don't need it.
 
 **GGUF (optional).** With [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF) installed, `.gguf` files appear in the
 model list, e.g. `LTX-2.5-Distilled-Q4_K_M.gguf` (15 GB, [realrebelai/LTX-2.5_GGUFs](https://huggingface.co/realrebelai/LTX-2.5_GGUFs)).
@@ -540,11 +594,11 @@ and ComfyUI itself the same way, then restart. The console line starting with `C
 | Spec | Value |
 |---|---|
 | Best resolution | **1920x1088** (a 1920x1080 plate is padded automatically). LTX alpha-gen is tuned for this size. |
-| Other sizes | Work, but edges get softer; at half resolution the subject's alpha visibly drops. |
-| 4K and up | Matte a 1080p proxy and scale the alpha up. |
+| Smaller plates | Work, but edges get softer; at half resolution the subject's alpha visibly drops. |
+| Bigger plates | Matted at their own resolution: a 1080p proxy decides the subject, native 1920x1088 tiles draw the edges (v14). Tested on UHD 4K, DCI 4K and 2K; 6K and 8K untested. |
 | Shot length | Up to 24 chunks, about **960 frames** at the default settings. Split longer shots. |
 | Frame range | From the frame you pick on to the end of the plate; earlier frames come out empty. |
-| Speed (RTX 5090, Best) | 49-frame preview about 4 min; a 247-frame shot about 25 min. Overlap mode (v13): about 4.7 and 26.5 min. |
+| Speed (RTX 5090, Best) | 49-frame preview about 4 min; a 247-frame shot about 25 min. Overlap mode (v13): about 4.7 and 26.5 min. UHD 4K with native edges: about 9 min and 58 min (242 frames); off: about 4 and 19 min. |
 | Output | Alpha as 16-bit PNG or half-float EXR, plate frame numbers kept (`plate.1001` gives `alpha_01001`). |
 | Subjects | One matte per run; it can stack several objects (a man, his glass and the table). |
 
