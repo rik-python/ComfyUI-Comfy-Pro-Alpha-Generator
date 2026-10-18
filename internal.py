@@ -693,11 +693,20 @@ def _native_alpha(alpha, native_hw, tiles, coverage, others):
     return out
 
 
+def _out_dir(prefix):
+    """filename_prefix -> folder under ComfyUI/output (a prefix like ../x must not write outside it, as SaveImage)."""
+    base = os.path.realpath(folder_paths.get_output_directory())
+    out = os.path.realpath(os.path.join(base, prefix))
+    if os.path.commonpath([base, out]) != base:
+        raise ValueError(f"filename_prefix '{prefix}' points outside the ComfyUI output folder")
+    os.makedirs(out, exist_ok=True)
+    return out
+
+
 def _save(alpha, prefix, fmt, first_frame):
     import cv2
 
-    out_dir = os.path.join(folder_paths.get_output_directory(), prefix)
-    os.makedirs(out_dir, exist_ok=True)
+    out_dir = _out_dir(prefix)
     if fmt == "exr":
         os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
     for i, a in enumerate(alpha):
@@ -874,8 +883,7 @@ class EdgeColour(io.ComfyNode):
             else:
                 ran = "perfect"
         s = max(W, H) / 1920  # pixel scale vs 1080p, the same for portrait plates
-        out_dir = os.path.join(folder_paths.get_output_directory(), filename_prefix)
-        os.makedirs(out_dir, exist_ok=True)
+        out_dir = _out_dir(filename_prefix)
         comp_t = torch.empty((n, H, W, 3), dtype=torch.float32) if comp else torch.zeros(1, 64, 64, 3)
         every = max(1, n // 48)
         size = (min(960, W), int(min(960, W) * H / W))

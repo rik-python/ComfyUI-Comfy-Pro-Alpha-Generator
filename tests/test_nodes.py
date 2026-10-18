@@ -472,3 +472,15 @@ def test_edge_colour_radius_scale_ignores_orientation(pack, out_dirs, monkeypatc
         pack.I.EdgeColour.execute(images=torch.rand(1, h, w, 3), start=0, alpha=torch.rand(1, h, w), info="{}",
                                   mode="quick", filename_prefix="t/o", format="png16", first_frame=1, comp=False)
     assert seen[0] == seen[1]
+
+
+# ------------------------------------------------------------------ output paths stay under ComfyUI/output
+
+@pytest.mark.parametrize("prefix", ["../escape", "a/../../escape"])
+def test_saves_refuse_prefix_outside_output(pack, out_dirs, prefix):
+    with pytest.raises(ValueError, match="output folder"):
+        pack.I._save(torch.zeros(1, 8, 8), prefix, "png16", 1)
+    args = dict(_edge_args(), filename_prefix=prefix)
+    with pytest.raises(ValueError, match="output folder"):
+        pack.I.EdgeColour.execute(**args)
+    assert not (out_dirs / "escape").exists()
