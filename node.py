@@ -26,6 +26,10 @@ MODELS = {
                   LTX + "diffusion_models/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors"),
     "alpha_lora": ("loras", "ltx-2.5-22b-ic-lora-alpha-gen-0.9.safetensors",
                    "https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Alpha-Gen/blob/main/ltx-2.5-22b-ic-lora-alpha-gen-0.9.safetensors"),
+    # v15 perfect edge colour only (gated download: accept the licence on Hugging Face first). Not required:
+    # without it perfect runs as quick, so validate_inputs skips it (OPTIONAL_MODELS).
+    "clean_plate_lora": ("loras", "ltx-2.5-22b-ic-lora-clean-plate-1.0.safetensors",
+                         "https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Clean-Plate"),
     "text_encoder": ("text_encoders", "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
                      LTX + "text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors"),
     "video_vae": ("vae", "ltx-2.5-video-vae-conv-bf16.safetensors", LTX + "vae/ltx-2.5-video-vae-conv-bf16.safetensors"),
@@ -37,10 +41,12 @@ ALSO_OK = {
     "video_vae": lambda n: "ltx" in n and "2.5" in n and "video" in n and "conv" in n,
 }
 # Node packs the expansion needs: node type -> pack name (checked before running, so the error says what to install).
+OPTIONAL_MODELS = {"clean_plate_lora"}
 PACKS = {"LoadSAM3Model": "ComfyUI-SAM3", "LTXAddVideoICLoRAGuide": "ComfyUI-LTXVideo"}
 QUALITY = ["Best (v12, 2 LTX passes)", "Fast (v7, 1 LTX pass)"]
 V12, V7 = QUALITY
 RENDER = ["full shot", "preview chunk"]
+EDGE_COLOUR = ["quick", "perfect", "off"]
 SIGMAS = "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
 
 
@@ -86,10 +92,12 @@ def _model_problem(widget, value):
         return f"{widget}: '{value}' is not the LTX-2.5 conv video VAE (only the conv VAE can encode the plate). {get}"
     if widget == "alpha_lora" and "alpha" not in low:
         return f"{widget}: '{value}' is not the alpha-gen IC-LoRA. {get}"
+    if widget == "clean_plate_lora" and "clean" not in low:
+        return f"{widget}: '{value}' is not the Clean Plate IC-LoRA. {get}"
     return None
 
 
-def _model_input(widget, label):
+def _model_input(widget, label, optional=False):
     kind, prefer, _ = MODELS[widget]
     tip = f"Recommended: {prefer} | folder: ComfyUI/models/{kind}/ (press R after adding files)"
     if widget == "ltx_model":
@@ -100,7 +108,9 @@ def _model_input(widget, label):
         files = [n for n in _models(widget) if not n.startswith(MISSING)]
         return io.Combo.Input(widget, options=[BUILTIN] + files, default=BUILTIN, display_name=label, tooltip=(
             f"{BUILTIN}: same result, skips loading the 13 GB encoder. Or pick {prefer} from ComfyUI/models/{kind}/"))
-    return io.Combo.Input(widget, options=_models(widget), display_name=label, tooltip=tip)
+    if widget == "clean_plate_lora":
+        tip += " | Only for edge colour = perfect; without it perfect runs as quick"
+    return io.Combo.Input(widget, options=_models(widget), display_name=label, tooltip=tip, optional=optional)
 
 
 def _resolve(widget, name):
@@ -129,7 +139,7 @@ def _vitmatte_options():
     return found + ["auto-download"]
 
 
-def _ltx_chunks(g, stack, images, offset, count, starts, L, plan, attn=None, tile=None):
+def _ltx_chunks(g, stack, images, offset, count, starts, L, plan, attn=None, tile=None, decode="alpha"):
     """One LTX alpha-gen pass over the processed range, chunked and cross-faded (Stitch).
 
     stack: links of the shared LTX nodes (pos, neg, vae, latent, alat, model, lora_scale, noise, sampler, sigmas)
@@ -137,7 +147,8 @@ def _ltx_chunks(g, stack, images, offset, count, starts, L, plan, attn=None, til
     attn: a subject MASK over the processed range -> the guide's attention_mask (v13), so LTX mattes that subject on
     the real plate (plus the parts it hides, which v13 subtracts again where others are in front).
     tile: (x, y, w, h) of a native-resolution tile (v14): each chunk is cut from that window of `images` inside
-    the guide node, and the chunks are decoded and stitched in one node (RAM: no per-chunk images are cached)."""
+    the guide node, and the chunks are decoded and stitched in one node (RAM: no per-chunk images are cached).
+    decode="rgb" (v15 clean plate): keep the colour; the chunks are decoded and stitched in one node to uint8."""
     chunks = {}
     for i, s in enumerate(starts):
         if tile is not None:  # v14: crop + guide fused, decode + stitch fused (no 1.2 GB chunk images cached)
@@ -170,8 +181,13 @@ def _ltx_chunks(g, stack, images, offset, count, starts, L, plan, attn=None, til
                       sigmas=stack["sigmas"], latent_image=av.out(0))
         sep = g.node("LTXVSeparateAVLatent", av_latent=samp.out(0))
         crop = g.node("LTXVCropGuides", positive=guide.out(0), negative=guide.out(1), latent=sep.out(0))
+        if decode == "rgb":
+            chunks[f"chunk_{i}"] = crop.out(2)
+            continue
         dec = g.node("ComfyProAlpha_DecodeAlpha", samples=crop.out(2), vae=stack["vae"])
         chunks[f"chunk_{i}"] = dec.out(0)
+    if decode == "rgb":
+        return g.node("ComfyProAlpha_DecodeStitchRGB", plan=plan, vae=stack["vae"], **chunks).out(0)
     if tile is not None:
         return g.node("ComfyProAlpha_DecodeStitch", plan=plan, vae=stack["vae"], **chunks).out(0)
     return g.node("ComfyProAlpha_Stitch", plan=plan, **chunks).out(0)
@@ -209,6 +225,7 @@ class ComfyProAlphaGenerator(io.ComfyNode):
                 # models (always visible)
                 _model_input("ltx_model", "LTX-2.5 model"),
                 _model_input("alpha_lora", "alpha-gen IC-LoRA"),
+                _model_input("clean_plate_lora", "Clean Plate IC-LoRA (perfect)", optional=True),
                 _model_input("text_encoder", "text encoder"),
                 _model_input("video_vae", "video VAE (conv)"),
                 _model_input("audio_vae", "audio VAE"),
@@ -271,6 +288,14 @@ class ComfyProAlphaGenerator(io.ComfyNode):
                     "time on a 4K plate. Off: matte at 1080p and scale the alpha up (fast). Plates at 1080p or "
                     "smaller are not affected. Plates only a little bigger than 1080p (up to about 2300 px wide, "
                     "e.g. 2K) gain little detail for the full tile cost: switch it off there to save time.")),
+                io.Combo.Input("edge_colour", options=EDGE_COLOUR, default=EDGE_COLOUR[0], optional=True,
+                               display_name="edge colour (v15)", tooltip=(
+                    "quick: rebuilds the colour of the soft edges from the subject itself, so sky or grass behind "
+                    "hair does not stay in the strands (CPU, no extra VRAM: about 2 s a frame at 1080p, 4 s a "
+                    "frame at 4K). perfect: LTX Clean Plate rebuilds the background, which is then subtracted from "
+                    "the edges (one extra LTX pass per chunk on the 1080p proxy, plus about 2 s a frame at 4K; "
+                    "needs the Clean Plate IC-LoRA). off: the raw plate in the edges, as v0.4.1. The alpha is the "
+                    "same in every mode. Saves rgba_ files next to the alpha.")),
             ],
             outputs=[io.Mask.Output("alpha"), io.Image.Output("comp")],
             hidden=[io.Hidden.unique_id, io.Hidden.dynprompt],
@@ -283,7 +308,7 @@ class ComfyProAlphaGenerator(io.ComfyNode):
         if packs:
             return f"Missing node pack(s): {', '.join(packs)}. Install with the Manager (Custom Nodes Manager), then restart ComfyUI."
         problems = [_model_problem(w, kw.get(w)) for w in MODELS
-                    if not (w == "text_encoder" and kw.get(w) == BUILTIN)]
+                    if not (w == "text_encoder" and kw.get(w) == BUILTIN) and w not in OPTIONAL_MODELS]
         problems = [p for p in problems if p]
         if problems:
             return "Model setup: " + " | ".join(problems)
@@ -300,7 +325,8 @@ class ComfyProAlphaGenerator(io.ComfyNode):
                 video_vae, audio_vae, vitmatte, chunk, overlap, seed, erode, dilate, near_px, stabilize_radius,
                 sam3_threshold, fast_attention=True, overlap_mode=False, hair_guide=False,
                 v13_depth=True, hair_radius=4, attn_grow=20, attn_blur=10.0, attn_strength=1.0, occluder_reach=20,
-                limb_cap=90, front_smoothing=3, native_edges=True):
+                limb_cap=90, front_smoothing=3, native_edges=True, edge_colour=EDGE_COLOUR[0],
+                clean_plate_lora=None):
         p = json.loads(picks)
         n_video, H, W = images.shape[:3]
         ltx_model, alpha_lora, video_vae, audio_vae = (_resolve(w, v) for w, v in (
@@ -450,8 +476,26 @@ class ComfyProAlphaGenerator(io.ComfyNode):
                 final_kw.update(tiles=edges.out(0), coverage=edges.out(1), tile_count=edges.out(2))
         final = g.node("ComfyProAlpha_Final", plate=plate.out(0), ltx=ltx, selection=sel, refined=refined,
                        others=others, near_px=near_px, filename_prefix=prefix, format=format,
-                       first_frame=first_frame + start, save=True, qc=True, comp=comp_wired, **final_kw)
-        return io.NodeOutput(final.out(0), final.out(1), expand=g.finalize())
+                       first_frame=first_frame + start, save=True, qc=True,
+                       comp=comp_wired and edge_colour == "off", **final_kw)
+        if edge_colour == "off":  # v0.4.1: the raw plate in the edges
+            return io.NodeOutput(final.out(0), final.out(1), expand=g.finalize())
+        # v15: the subject's own colour in the edges, from the full-precision plate (native size when v14)
+        ec_kw = {}
+        if edge_colour == "perfect" and clean_plate_lora and _model_problem("clean_plate_lora", clean_plate_lora) is None:
+            # LTX-2.5 Clean Plate on the processed range (the proxy on big plates: the unmix only uses its colour,
+            # and LTX invents the background's fine texture anyway); same stack as alpha-gen, other LoRA
+            cl = g.node("LTXICLoRALoaderModelOnly", model=unet.out(0),
+                        lora_name=_resolve("clean_plate_lora", clean_plate_lora), strength_model=1.0)
+            cmodel = cl.out(0)
+            if fast_attention and _kitchen_attention():
+                cmodel = g.node("ModelAttentionBackend", model=cmodel, attention="comfy kitchen attention").out(0)
+            cstack = {**stack, "model": cmodel, "lora_scale": cl.out(1)}
+            ec_kw["clean_plate"] = _ltx_chunks(g, cstack, src, start, count, starts, L, plan, decode="rgb")
+        ec = g.node("ComfyProAlpha_EdgeColour", images=native_src if native_src is not None else src, start=start,
+                    alpha=final.out(0), info=final.out(2), mode=edge_colour, filename_prefix=prefix, format=format,
+                    first_frame=first_frame + start, comp=comp_wired, others=others, **ec_kw)
+        return io.NodeOutput(final.out(0), ec.out(0), expand=g.finalize())
 
 
 class LegacySelectiveMatte(ComfyProAlphaGenerator):

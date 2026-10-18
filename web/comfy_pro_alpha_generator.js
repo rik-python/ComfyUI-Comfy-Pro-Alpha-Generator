@@ -13,7 +13,7 @@ import { api } from "../../scripts/api.js";
 const NODE = "ComfyProAlphaGenerator";
 const LEGACY = "SelectiveMatte";  // old node id: workflows saved before the rename
 const TITLE = "Comfy Pro Alpha Generator";
-const VERSION = "0.4.1";
+const VERSION = "0.5.0";
 const ADVANCED = ["text_encoder", "chunk", "overlap", "fast_attention",
     "seed", "control_after_generate", "erode", "dilate", "near_px", "stabilize_radius", "sam3_threshold"];
 const HIDDEN = ["picks", "render"];
@@ -441,7 +441,7 @@ class Picker {
 
         HIDDEN.forEach((n) => hideWidget(this.w[n]));
         ADVANCED.forEach((n) => hideWidget(this.w[n]));
-        for (const name of ["overlap_mode", "hair_guide"]) {
+        for (const name of ["overlap_mode", "hair_guide", "edge_colour"]) {
             const w = this.w[name];
             if (!w) continue;
             const cb = w.callback;
@@ -470,6 +470,7 @@ class Picker {
         const [bw, bh] = ih > iw ? [1088, 1920] : [1920, 1088];  // LTX's frame in the plate's orientation
         const big = !iw || iw > bw || ih > bh;
         grey(this.w.native_edges, !big);
+        grey(this.w.clean_plate_lora, this.w.edge_colour?.value !== "perfect");  // v15: only perfect uses it
         this.fitNode();
     }
 
@@ -1071,6 +1072,13 @@ class Picker {
             b.title = info.native_edges
                 ? "Matted on a 1080p proxy; the edges were rendered again on native-resolution tiles and merged in."
                 : "Matted on a 1080p proxy and scaled up (native-resolution edges off, or no edge found to refine).";
+            kids.push(b);
+        }
+        if (info.edge_colour) {  // v15: clean colour in the soft edges (absent = off, the raw plate)
+            const b = badge("edge colour", info.edge_colour, info.edge_note ? "sm-a" : "sm-g");
+            b.title = info.edge_note || (info.edge_colour === "perfect"
+                ? "Background rebuilt by LTX Clean Plate and subtracted from the edges; rgba_ files saved."
+                : "Edge colour rebuilt from the subject itself; rgba_ files saved.");
             kids.push(b);
         }
         const tog = btn("quiet", "preview", this.result.view === "alpha" ? "Show comp" : "Show alpha");

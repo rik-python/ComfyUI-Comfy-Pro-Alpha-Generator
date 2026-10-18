@@ -457,6 +457,205 @@ def merge_native(base, tiles, coverage, s, others=None):
     return np.clip(core * b + (1 - core) * (trust * t + (1 - trust) * b), 0, 1)
 
 
+# ---------------------------------------------------------------- v15 edge colour
+
+def srgb_to_linear(x):
+    """sRGB-encoded 0-1 -> linear light (IEC 61966-2-1), float32."""
+    x = np.clip(np.asarray(x, np.float32), 0, 1)
+    return np.where(x <= 0.04045, x / 12.92, ((x + 0.055) / 1.055) ** 2.4).astype(np.float32)
+
+
+def linear_to_srgb(x):
+    """Linear light 0-1 -> sRGB-encoded, float32."""
+    x = np.clip(np.asarray(x, np.float32), 0, 1)
+    return np.where(x <= 0.0031308, x * 12.92, 1.055 * x ** (1 / 2.4) - 0.055).astype(np.float32)
+
+
+def blur_fusion(I, a, r, F=None, B=None):
+    """One Blur-Fusion pass (Forte, ICIP 2021). I: [H,W,3] linear plate; a: [H,W]; F, B: the previous pass's
+    estimates (default: the plate). Returns (F, B): the foreground estimate and the blurred background."""
+    F = I if F is None else F
+    B = I if B is None else B
+    a3 = _f32(a)[..., None]
+    ba = cv2.blur(_f32(a), (r, r))[..., None]
+    fb = cv2.blur(F * a3, (r, r)) / (ba + 1e-5)
+    bb = cv2.blur(B * (1 - a3), (r, r)) / (1 - ba + 1e-5)
+    return np.clip(fb + a3 * (I - a3 * fb - (1 - a3) * bb), 0, 1).astype(np.float32), bb.astype(np.float32)
+
+
+LUMA = np.float32([0.2126, 0.7152, 0.0722])  # Rec.709 luminance weights (linear light)
+
+
+def _blur_big(x, sigma):
+    """Gaussian blur that stays fast at large sigma: work on a downscaled copy (sigma 2 there), scale back up."""
+    if sigma <= 4:
+        return cv2.GaussianBlur(x, (0, 0), sigma).reshape(x.shape)  # OpenCV drops a single channel axis
+    h, w = x.shape[:2]
+    f = sigma / 2
+    sw, sh = max(1, round(w / f)), max(1, round(h / f))
+    small = cv2.GaussianBlur(cv2.resize(x, (sw, sh), interpolation=cv2.INTER_AREA), (0, 0), 2)
+    return cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR).reshape(x.shape)
+
+
+def fill_from(x, mask, s=1.0, default=None):
+    """Values of x inside mask pushed outward (normalized convolution, finest scale that reaches each pixel):
+    the EdgeExtend colour of the solid inside. x: [H,W,C]; returns float32 [H,W,C]. Where nothing reaches:
+    `default` (per channel), or x itself."""
+    out = np.array(x, np.float32, copy=True)
+    if default is not None:
+        out[:] = np.float32(default)
+    done = np.zeros(mask.shape, bool)
+    m = mask.astype(np.float32)
+    xm = x * m[..., None]
+    for sg in (1.5, 3, 6, 12, 24, 48, 96):
+        sg *= max(s, 0.25)
+        den = _blur_big(m, sg)
+        ok = (den > 0.02) & ~done
+        if ok.any():
+            out[ok] = _blur_big(xm, sg)[ok] / den[ok][:, None]
+            done |= ok
+        if done.all():
+            break
+    return out
+
+
+def quick_colour(I, a, s=1.0, erode=2, spread=1.5):
+    """v15 quick: the subject's own colour F in the soft edge, one frame, linear light.
+
+    The edge band is everything outside the solid inside (alpha >= 0.98, eroded by `erode` px at 1080p): LTX
+    edges often run a pixel wide, so even alpha ~1 there can still carry sky or grass. In the band the colour
+    (chroma) comes from the solid inside, pushed outward (EdgeExtend), and the brightness comes from Blur-Fusion
+    (Forte, ICIP 2021; r = 90 then 6 at 1080p; s = frame width / 1920) so strand and fabric texture stays,
+    clamped to the inside's local brightness range (mean +- spread x std) so a white sky or a dark background
+    cannot leak in as brightness. The solid inside is the plate exactly."""
+    I = _f32(I)
+    a = _f32(a)
+    F, B = blur_fusion(I, a, max(1, round(90 * s)))
+    F, _ = blur_fusion(I, a, max(1, round(6 * s)), F, B)
+    inner = cv2.erode((a >= 0.98).astype(np.uint8), ellipse(max(1, round(erode * s)))).astype(bool)
+    if not inner.any():  # nothing solid to extend from: Blur-Fusion alone
+        return F
+    Fe = fill_from(I, inner, s)
+    L = I @ LUMA
+    st = fill_from(np.dstack([L, L * L]), inner, s)
+    sd = np.sqrt(np.maximum(st[..., 1] - st[..., 0] ** 2, 0))
+    Lt = np.clip(F @ LUMA, st[..., 0] - spread * sd, st[..., 0] + spread * sd)
+    out = np.clip(Fe * (Lt / np.maximum(Fe @ LUMA, 1e-4))[..., None], 0, 1)
+    return np.where(inner[..., None], I, out).astype(np.float32)
+
+
+def _smoothstep(e0, e1, x):
+    t = np.clip((x - e0) / (e1 - e0), 0, 1)
+    return t * t * (3 - 2 * t)
+
+
+def _ring(a, s):
+    """The visible background just outside the matte: alpha < 0.02 within 12 px (at 1080p) of alpha > 0.02."""
+    inside = (_f32(a) > 0.02).astype(np.uint8)
+    return cv2.dilate(inside, ellipse(max(1, round(12 * s)))).astype(bool) & ~inside.astype(bool)
+
+
+def match_clean(B, I, a, s=1.0):
+    """v15 perfect: grade the clean plate to the real plate. LTX's clean plate drifts in colour (seen: about -0.04
+    blue on grass); the difference measured on the visible ring is spread smoothly (normalized convolution at
+    48 px@1080, a local grade), so it fixes drift without copying the ring's detail, and a wrongly rebuilt
+    background still shows up in clean_confidence."""
+    B, I = _f32(B), _f32(I)
+    ring = _ring(a, s)
+    if not ring.any():
+        return B
+    lo = lambda x: cv2.GaussianBlur(x, (0, 0), max(0.5, 2 * s))
+    d = (lo(I) - lo(B)) * ring[..., None]
+    m = ring.astype(np.float32)[..., None]
+    sg = 48 * s
+    num, den = _blur_big(d, sg), _blur_big(m, sg)
+    off = np.where(den > 0.01, num / np.maximum(den, 1e-6), d[ring].mean(0) if ring.any() else 0)
+    return np.clip(B + off, 0, 1).astype(np.float32)
+
+
+def clean_confidence(B, I, a, others=None, s=1.0):
+    """v15 perfect: 0..1 per pixel, how far the clean plate B can be trusted in the edge. Checked where the real
+    background is visible (the ring just outside the matte), where B must equal the plate in low frequencies
+    (blur 2 px@1080: LTX rebuilds texture such as grass blades differently, and only the colour matters for the
+    unmix). The ring's error is pushed inward over the edge (fill_from); 0.02 error or less = trusted, 0.06 or
+    more = not (linear). Also 0 where the subject was not removed (B ~ plate inside it). Next to another person (others mask) it is 0: the true background behind the edge
+    there is that person, which the clean plate removed."""
+    a = _f32(a)
+    ring = _ring(a, s)
+    lo = lambda x: cv2.GaussianBlur(_f32(x), (0, 0), max(0.5, 2 * s))
+    err = np.abs(lo(B) - lo(I)).mean(-1)
+    e = fill_from(err[..., None], ring, s, default=[err[ring].mean()])[..., 0] if ring.any() else np.ones_like(a)
+    conf = np.clip((0.06 - e) / 0.04, 0, 1).astype(np.float32)
+    # Clean Plate fails when people fill the frame: it re-renders them. Then B equals the plate inside the subject
+    # too (the ring test still passes). Inside the solid subject B must differ from the plate: 0.03 or less = not
+    # removed, 0.08 or more = removed, pushed outward over the edge like the ring error.
+    inner = cv2.erode((a >= 0.98).astype(np.uint8), ellipse(max(1, round(6 * s)))).astype(bool)
+    if inner.any():
+        gone = np.abs(lo(B) - lo(I)).mean(-1)
+        g = fill_from(gone[..., None], inner, s, default=[gone[inner].mean()])[..., 0]
+        conf *= np.clip((g - 0.03) / 0.05, 0, 1)
+    if others is not None:
+        near = cv2.dilate((_f32(others) > 0.5).astype(np.uint8), ellipse(max(1, round(24 * s))))
+        conf *= 1 - cv2.GaussianBlur(near.astype(np.float32), (0, 0), max(0.5, 4 * s))
+        conf[near.astype(bool)] = 0
+    return conf
+
+
+def unmix_colour(I, a, B, F_quick, conf):
+    """v15 perfect: F = (I - (1-a) B) / a with the clean plate B, weighted by conf and by alpha: full weight for
+    0.25 <= a <= 0.85; toward quick where a is small (the division blows noise up) and where a is near 1 (LTX
+    rims run a pixel wide: there the plate is background even at alpha ~1, which only quick's extend fixes)."""
+    a = _f32(a)
+    a3 = a[..., None]
+    Fu = np.clip((_f32(I) - (1 - a3) * _f32(B)) / np.maximum(a3, 1e-3), 0, 1)
+    w = (_f32(conf) * _smoothstep(0.05, 0.25, a) * (1 - _smoothstep(0.85, 0.98, a)))[..., None]
+    return (w * Fu + (1 - w) * _f32(F_quick)).astype(np.float32)
+
+
+def _smooth_one(dis, Fs, g, t, radius, t_sigma=1.2, photo_sigma=8.0):
+    """Frame t of Fs [n,H,W,3] averaged with its neighbours warped along the optical flow, weighted like
+    stabilize (time and photometric error). g: [n,h,w] uint8 plate, may be smaller than Fs (flow scaled up)."""
+    H, W = Fs.shape[1:3]
+    h, w = g.shape[1:]
+    sx, sy = W / w, H / h
+    gx, gy = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32))
+    sgx, sgy = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+    acc = Fs[t].astype(np.float32).copy()
+    wsum = np.ones((H, W), np.float32)
+    for k in range(max(0, t - radius), min(len(Fs), t + radius + 1)):
+        if k == t:
+            continue
+        flow = dis.calc(g[t], g[k], None)
+        warped = cv2.remap(g[k], sgx + flow[..., 0], sgy + flow[..., 1], cv2.INTER_LINEAR,
+                           borderMode=cv2.BORDER_REPLICATE)
+        err = cv2.GaussianBlur(np.abs(g[t].astype(np.float32) - warped.astype(np.float32)), (0, 0), 2)
+        wk = np.exp(-((k - t) ** 2) / (2 * t_sigma ** 2)) * np.exp(-(err / photo_sigma) ** 2)
+        if (h, w) != (H, W):
+            flow = cv2.resize(flow, (W, H), interpolation=cv2.INTER_LINEAR) * np.float32([sx, sy])
+            wk = cv2.resize(wk, (W, H), interpolation=cv2.INTER_LINEAR)
+        acc += wk[..., None] * cv2.remap(Fs[k].astype(np.float32), gx + flow[..., 0], gy + flow[..., 1],
+                                         cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+        wsum += wk
+    return acc / wsum[..., None]
+
+
+def smooth_colour(F, a, gray, radius=2, index=None, max_w=1920):
+    """Temporal smoothing of F (list of [H,W,3]) inside the edge band (0.002 < a < 0.999), warped along the
+    plate's optical flow. gray: [N,H,W] uint8 plate; the flow runs at most max_w wide (4K: half size). Pixels
+    outside the band are untouched. index: smooth only that frame and return it (a sliding window over a shot)."""
+    Fs = np.stack([_f32(f) for f in F])
+    n, h, w = gray.shape
+    if w > max_w:
+        sw, sh = max_w, max(1, round(h * max_w / w))
+        gray = np.stack([cv2.resize(g, (sw, sh), interpolation=cv2.INTER_AREA) for g in gray])
+    dis = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_MEDIUM)
+    out = []
+    for t in (range(n) if index is None else [index]):
+        band = ((_f32(a[t]) > 0.002) & (_f32(a[t]) < 0.999))[..., None]
+        out.append(np.where(band, _smooth_one(dis, Fs, gray, t, radius), Fs[t]).astype(np.float32))
+    return out if index is None else out[0]
+
+
 # ---------------------------------------------------------------- QC (measure_matte.py)
 
 def qc(gray, sel, ltx, alpha, others=None):

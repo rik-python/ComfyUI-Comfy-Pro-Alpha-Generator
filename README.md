@@ -108,6 +108,34 @@ It helps most on single strands, flyaways and fur against the background. Thick 
 subject touches another person, the 1080p result is kept on purpose: a tile only sees part of the frame and decides
 worse there. RAM grows with shot length (see [Hardware](#hardware)).
 
+### Clean edge colour (v15)
+
+<p align="center"><img src="docs/images/edge_colour.jpg" width="760" alt="edge colour off, quick, perfect over green"></p>
+
+<sub>Subject comped over green, 2x zoom. Off: the plate's own colour stays in the soft edge, so the sky behind the
+sleeve shows as a white halo and the grass as a lime line down the shirt. Quick and perfect rebuild the subject's
+colour there.</sub>
+
+The alpha was right, but every soft edge still carried the background it was shot against: sky in the strands, grass
+along the shirt. Over a new background that shows as a halo. v15 rebuilds the subject's own colour in the edge and
+outputs a **clean premultiplied comp**, saved next to the alpha as `rgba_` files. The alpha itself does not change.
+
+| Curls shot, 49 frames | Off (v0.4) | **Quick** (default) | Perfect |
+|---|:---:|:---:|:---:|
+| Background left in the edge (lower = cleaner) | 0.159 | **0.056** | 0.062 |
+| Edge colour flicker (lower = steadier) | 0.064 | **0.021** | 0.028 |
+
+- **Quick** works like an eroded EdgeExtend in Nuke: the colour comes from 2 px inside the subject and is pushed
+  outward over the soft edge; the plate's brightness is kept for texture (stripes, strands), limited to the
+  brightness range inside the subject so a white sky can't leak in. LTX edges often run a pixel wide, so even
+  "solid" alpha there still holds background; quick cleans that rim too.
+- **Perfect** also runs LTX-2.5 **Clean Plate**, which removes the people and rebuilds the background behind them,
+  then subtracts that background from the edge (`F = (I - (1 - a) B) / a`). It is checked against the real plate
+  and falls back to quick wherever the clean plate can't be trusted: next to other people, and on shots where the
+  subjects fill the frame (Clean Plate then re-renders them instead of removing them). On a wide shot it gives a
+  slightly tighter, more physical soft edge; on a close-up it gives the same result as quick, at the cost of one
+  more LTX pass.
+
 ### Any subject
 
 <p align="center"><img src="docs/images/any_subject.jpg" width="900" alt="dog, motorbike, kid"></p>
@@ -368,9 +396,10 @@ change them only to fix a specific problem:
 | `first_frame` | 1 | Frame number of the first image; output files use it. | **1001** (or your plate's start) for VFX numbering. Load Plate Sequence sets it for you. |
 | `quality` | Best (v12) | 2 LTX passes (Best) or 1 (Fast). Greyed out in v13. | Fast for look-dev and triage, Best for finals. |
 | `native-resolution edges (v14)` | on | Plates bigger than 1920x1088: LTX renders the subject's edges again on native 1920x1088 tiles and merges them into the proxy matte. Works with every mode. Greyed out for plates of 1080p or less. | **Off** for a fast first look, when RAM is short on a long 4K shot, or on plates only a little over 1080p (2K): little extra detail there for the full tile cost. Off gives the 1080p matte scaled up, 2 to 3x faster. Leave it **on** for finals with fine hair, fur or flyaways. |
+| `edge colour (v15)` | quick | Rebuilds the subject's colour in the soft edges so the background doesn't show through, and saves `rgba_` files (clean premultiplied comp) next to the alpha. **quick**: classical, a few seconds per frame. **perfect**: adds an LTX Clean Plate pass and subtracts the real background (needs the Clean Plate IC-LoRA). **off**: the raw plate in the edges, as v0.4. The alpha is identical in all three. | **perfect** for finals on wide shots where background shows around the subject. **off** only to reproduce a v0.4 render exactly. |
 | `filename_prefix` | `comfy_pro_alpha/shot` | Output folder under `ComfyUI/output/`. | One per shot (`show/sh010_hero`) so renders don't overwrite each other. |
 | `format` | png16 | 16-bit PNG or half-float EXR. | **exr** for a Nuke/EXR pipeline. Both hold the full soft edge. |
-| model selectors | the recommended files | LTX model, alpha-gen IC-LoRA, video VAE (must be the **conv** VAE), audio VAE, ViTMatte. | Only to pick a GGUF (see [Hardware](#hardware)) or a file in another folder. `MISSING:` means the file isn't found. |
+| model selectors | the recommended files | LTX model, alpha-gen IC-LoRA, Clean Plate IC-LoRA (perfect edge colour only; greyed out otherwise), video VAE (must be the **conv** VAE), audio VAE, ViTMatte. | Only to pick a GGUF (see [Hardware](#hardware)) or a file in another folder. `MISSING:` means the file isn't found. |
 
 **⚙ Advanced**
 
@@ -447,7 +476,19 @@ frame size, not measured). The alpha files on disk don't need it. Measured on v0
 is full 32-bit like the 1080p one, which adds about 4 GB at 242 frames with native edges off (computed, not
 measured). With native edges on it evens out: the tile coverage map is now stored once instead of per frame.
 
-**GGUF (optional).** With [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF) installed, `.gguf` files appear in the
+**Edge colour (v15) cost**, RTX 5090, on top of the matte:
+
+| Shot | Quick | Perfect |
+|---|---|---|
+| 1080p, 49-frame preview | +1.4 min (4.7 to 6.1 min) | +2.8 min (4.7 to 7.5 min) |
+| UHD 4K, 49-frame preview | about +4.5 min (from the 242-frame run) | +8 min (about 9 to 17 min) |
+| UHD 4K, 242-frame shot | +23 min (58 to 81 min) | not measured |
+
+Quick works one frame at a time and keeps only 5 frames in memory, so it adds little RAM
+(about 1 GB at 4K, computed: 5 frames of colour, grey plate and flow). Perfect's clean plate is rendered on the 1080p proxy and scaled up: the edge only needs its
+colour, and LTX invents the background's fine texture anyway.
+
+**GGUF (optional). With [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF) installed, `.gguf` files appear in the
 model list, e.g. `LTX-2.5-Distilled-Q4_K_M.gguf` (15 GB, [realrebelai/LTX-2.5_GGUFs](https://huggingface.co/realrebelai/LTX-2.5_GGUFs)).
 Use it only to save disk space: GGUF can't be streamed from disk, so it needs *more* RAM (27 vs 21 GB) and runs about
 30% slower. Edge difference 0.05; it looks the same.
@@ -512,6 +553,7 @@ Restart ComfyUI afterwards.
 | File | Size | Download | Put it in | When |
 |---|--:|---|---|---|
 | `LTX-2.5-Distilled-Q4_K_M.gguf` | 15.1 GB | [realrebelai/LTX-2.5_GGUFs](https://huggingface.co/realrebelai/LTX-2.5_GGUFs/blob/main/LTX-2.5-Distilled-Q4_K_M.gguf) | `models/diffusion_models/` | Short on disk space (needs [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF)) |
+| `ltx-2.5-22b-ic-lora-clean-plate-1.0.safetensors` | 0.3 GB | [Lightricks/LTX-2.5-22b-IC-LoRA-Clean-Plate](https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Clean-Plate) (gated: accept the terms on that page first) | `models/loras/` | Only for **edge colour = perfect**. Without it, perfect runs as quick and the badge says so |
 | `gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors` | 15.4 GB | [Lightricks/LTX-2.5](https://huggingface.co/Lightricks/LTX-2.5/blob/main/text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors) | `models/text_encoders/` | Never required (built-in prompt gives the same result) |
 
 </details>
@@ -576,8 +618,10 @@ Then restart ComfyUI.
   script, and the browser keeps the old one until you reload.
 - **Check the version** on the node: the small tag next to the title (for example `v0.3.0`) should match the
   [version on GitHub](https://github.com/rik-python/ComfyUI-Comfy-Pro-Alpha-Generator/blob/main/pyproject.toml).
-- **Saved workflows keep their settings.** New settings arrive with their defaults, so an old workflow renders the
-  same as before until you change something.
+- **Saved workflows keep their settings.** New settings arrive with their defaults. One exception since v0.5.0:
+  `edge colour` defaults to **quick**, so an old workflow's `comp` output becomes the clean premultiplied comp and
+  `rgba_` files are written next to the alpha. The alpha files are unchanged. Set `edge colour` to **off** to get a
+  v0.4 render exactly.
 - **New models download themselves** the first time a feature needs them (Depth Anything V2 Small for overlap mode).
 
 **If `git pull` refuses** with "your local changes would be overwritten", you edited files in the pack. Keep a copy
@@ -601,14 +645,14 @@ and ComfyUI itself the same way, then restart. The console line starting with `C
 | Shot length | Up to 24 chunks, about **960 frames** at the default settings. Split longer shots. |
 | Frame range | From the frame you pick on to the end of the plate; earlier frames come out empty. |
 | Speed (RTX 5090, Best) | 49-frame preview about 4 min; a 247-frame shot about 25 min. Overlap mode (v13): about 4.7 and 26.5 min. UHD 4K with native edges: about 9 min and 58 min (242 frames); off: about 4 and 19 min. |
-| Output | Alpha as 16-bit PNG or half-float EXR, plate frame numbers kept (`plate.1001` gives `alpha_01001`). |
+| Output | Alpha as 16-bit PNG or half-float EXR, plate frame numbers kept (`plate.1001` gives `alpha_01001`). Since v15 also the clean colour as `rgba_01001`: EXR is scene-linear and premultiplied (the Nuke convention), PNG is sRGB with straight alpha (the PNG convention). |
 | Subjects | One matte per run; it can stack several objects (a man, his glass and the table). |
 
 | Works well | Works with care | Doesn't work (yet) |
 |---|---|---|
 | People, hair, animals with fur, vehicles with dust, props | A hand, arm or hair crossing the subject: turn on **overlap mode (v13)**. If the subject's own limb rests on someone and goes missing, add a click on it | Frames before the pick frame |
 | Busy shots with several people (the others are painted out) | Background objects (a parked car): LTX mattes what it reads as the main subject; the **LTX cover** badge goes red and ViTMatte takes over | A subject fully hidden mid-shot (a car driving in front): SAM3 can lose the track. Pick after the occlusion or split the shot |
-| Video files and EXR/PNG/TIF sequences | More than 8 other subjects near the target: only the nearest 8 are painted out (each costs about 14 s) | Despill: light hair fringes are plate colour spill. Despill in comp |
+| Video files and EXR/PNG/TIF sequences | More than 8 other subjects near the target: only the nearest 8 are painted out (each costs about 14 s) | Despill of light the subject really reflects (green bounce on skin from grass): edge colour only removes the background seen *through* soft edges. Despill in comp |
 | 12 GB VRAM, 16 GB RAM machines (slower) | | |
 
 **Not tested yet:** plates smaller than 1080p, vertical video, heavy motion blur, AMD and Apple GPUs.
@@ -617,8 +661,8 @@ and ComfyUI itself the same way, then restart. The console line starting with `C
 
 ## Credits
 
-Built on [LTX-2.5 and the IC-LoRA Alpha-Gen](https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Alpha-Gen) by
-Lightricks, [SAM3](https://github.com/facebookresearch/sam3) by Meta,
+Built on [LTX-2.5, the IC-LoRA Alpha-Gen](https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Alpha-Gen) and
+[Clean Plate](https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Clean-Plate) by Lightricks, [SAM3](https://github.com/facebookresearch/sam3) by Meta,
 [ViTMatte](https://huggingface.co/hustvl/vitmatte-base-composition-1k) by HUST Vision Lab,
 [Depth Anything V2](https://github.com/DepthAnything/Depth-Anything-V2) (Small) by its authors at HKU and TikTok,
 [ComfyUI-SAM3](https://github.com/PozzettiAndrea/ComfyUI-SAM3) and [ComfyUI](https://github.com/comfyanonymous/ComfyUI).
@@ -641,7 +685,7 @@ you accept those when you download them from their original pages:
 
 | Component | By | License |
 |---|---|---|
-| LTX-2.5 and the alpha-gen IC-LoRA | Lightricks | [LTX-2.x Community License](https://github.com/Lightricks/LTX-2/blob/main/LICENSE-2_x) (copy: [LICENSE-LTX-2.x](LICENSE-LTX-2.x)): companies with $10M+ annual revenue need a paid commercial license from Lightricks |
+| LTX-2.5, the alpha-gen and Clean Plate IC-LoRAs | Lightricks | [LTX-2.x Community License](https://github.com/Lightricks/LTX-2/blob/main/LICENSE-2_x) (copy: [LICENSE-LTX-2.x](LICENSE-LTX-2.x)): companies with $10M+ annual revenue need a paid commercial license from Lightricks |
 | ComfyUI-LTXVideo nodes | Lightricks | [LTX-2 Community License](https://github.com/Lightricks/ComfyUI-LTXVideo/blob/master/LICENSE) |
 | SAM3 | Meta | [SAM License](https://github.com/facebookresearch/sam3/blob/main/LICENSE) |
 | ComfyUI-SAM3 nodes | Andrea Pozzetti | [GPL-3.0](https://github.com/PozzettiAndrea/ComfyUI-SAM3/blob/main/LICENSE) (wrapper code; SAM3 itself stays under the SAM License) |
@@ -652,7 +696,7 @@ you accept those when you download them from their original pages:
 A commercial license for this node pack does **not** include rights to these models. For commercial work, check
 each license above as well, in particular the LTX revenue threshold.
 
-**LTX-2.x notice.** This pack runs Lightricks' LTX-2.x model and its alpha-gen IC-LoRA; it does not include them.
+**LTX-2.x notice.** This pack runs Lightricks' LTX-2.x model and its alpha-gen and Clean Plate IC-LoRAs; it does not include them.
 Your use of LTX-2.x, its derivatives and their outputs through this pack is subject to the LTX-2.x Community License
 in full, including the use-based restrictions in Section 4 and Attachment A and the
 [LTX Acceptable Use Policy](https://static.lightricks.com/legal/ltx-acceptable-use-policy.pdf). A complete copy of

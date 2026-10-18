@@ -6,6 +6,7 @@ Every stage is its own cached node: switching Fast/Best or re-running a preview 
 import json
 import os
 
+import cv2
 import numpy as np
 import torch
 
@@ -555,6 +556,42 @@ class DecodeStitch(io.ComfyNode):
         return io.NodeOutput((acc / wsum).clamp(0, 1).half())
 
 
+class DecodeStitchRGB(io.ComfyNode):
+    """v15 perfect: decode the clean plate's LTX chunks one at a time to RGB and cross-fade them (as Stitch), kept
+    as uint8 like the plate (a 1080p shot in float32 would be several GB). Frames go to uint8 as soon as no later
+    chunk touches them, so only one chunk's overlap is ever held in float."""
+    MAX = 24
+
+    @classmethod
+    def define_schema(cls):
+        return _schema("ComfyProAlpha_DecodeStitchRGB",
+                       [io.String.Input("plan"), io.Vae.Input("vae")]
+                       + [io.Latent.Input(f"chunk_{i}", optional=True) for i in range(cls.MAX)],
+                       [io.Image.Output("clean")])
+
+    @classmethod
+    def execute(cls, plan, vae, **chunks):
+        import nodes
+
+        p = json.loads(plan)
+        n, h, w, L, starts = p["n"], p["h"], p["w"], p["chunk"], p["starts"]
+        out = torch.empty((n, h, w, 3), dtype=torch.uint8)
+        acc, wsum = {}, {}  # frame -> float sum / weight, only for frames a later chunk still adds to
+        for i, s in enumerate(starts):
+            img = nodes.VAEDecodeTiled().decode(vae, chunks[f"chunk_{i}"], 512, 64, 64, 8)[0]
+            img = img.float().cpu()[:, :h, :w]
+            for k in range(min(L, n - s)):
+                wt = E.chunk_weight(i, starts, L, k)
+                f = s + k
+                acc[f] = img[k] * wt if f not in acc else acc[f].add_(img[k], alpha=wt)
+                wsum[f] = wsum.get(f, 0.0) + wt
+            del img
+            done = n if i == len(starts) - 1 else starts[i + 1]
+            for f in [f for f in acc if f < done]:
+                out[f] = acc.pop(f).div_(wsum.pop(f)).clamp_(0, 1).mul_(255).round_().to(torch.uint8)
+        return io.NodeOutput(out)
+
+
 class TileMerge(io.ComfyNode):
     """v14: feather-blend the rendered tiles into native-resolution frames, plus where they cover the plate."""
     MAX = 64
@@ -677,8 +714,29 @@ def _save(alpha, prefix, fmt, first_frame):
     return out_dir
 
 
-def _previews(plate, alpha, every):
-    """Small JPEG pairs (plate, comp over grey) in temp/ for the in-node compare viewer."""
+def _save_rgba(F, a, out_dir, fmt, frame):
+    """v15: one frame of the clean colour. EXR: half float, scene-linear, premultiplied. PNG: 16-bit sRGB, straight
+    alpha (the PNG convention). F: [H,W,3] linear; a: [H,W]."""
+    import cv2
+
+    a = E._f32(a)
+    path = os.path.join(out_dir, f"rgba_{frame:05d}.{'exr' if fmt == 'exr' else 'png'}")
+    if fmt == "exr":
+        os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
+        rgba = np.dstack([np.clip(F, 0, 1) * a[..., None], a])[..., [2, 1, 0, 3]].astype(np.float32)
+        ok = cv2.imwrite(path, rgba, [cv2.IMWRITE_EXR_TYPE, cv2.IMWRITE_EXR_TYPE_HALF,
+                                      cv2.IMWRITE_EXR_COMPRESSION, cv2.IMWRITE_EXR_COMPRESSION_ZIP])
+    else:
+        rgba = np.dstack([E.linear_to_srgb(F), np.clip(a, 0, 1)])[..., [2, 1, 0, 3]]
+        ok = cv2.imwrite(path, (rgba * 65535).round().astype(np.uint16))
+    if not ok:
+        raise RuntimeError(f"could not write {path}" + (" (OpenCV EXR disabled: start ComfyUI with "
+                                                         "OPENCV_IO_ENABLE_OPENEXR=1 or use png16)" if fmt == "exr" else ""))
+
+
+def _previews(plate, alpha, every, clean=None):
+    """Small JPEG pairs (plate, comp over grey) in temp/ for the in-node compare viewer. clean (v15): frame ->
+    linear clean colour already at preview size; the comp is then made from it, over grey, in linear light."""
     from PIL import Image
 
     tmp = folder_paths.get_temp_directory()
@@ -691,7 +749,14 @@ def _previews(plate, alpha, every):
     for f in range(0, len(alpha), every):
         rgb = plate[f].astype(np.float32) / 255.0 if plate.dtype == np.uint8 else plate[f]
         a = alpha[f][..., None]
-        comp = rgb * a + 0.5 * (1 - a)
+        if clean is not None:  # v15: work at preview size (a 4K frame list would be GBs)
+            import cv2
+            rgb = cv2.resize(E._f32(rgb), size, interpolation=cv2.INTER_AREA)
+            a = cv2.resize(E._f32(alpha[f]), size, interpolation=cv2.INTER_AREA)[..., None]
+            grey = E.srgb_to_linear(np.float32(0.5))
+            comp = E.linear_to_srgb(clean[f] * a + grey * (1 - a))
+        else:
+            comp = rgb * a + 0.5 * (1 - a)
         names = []
         for kind, img in (("plate", rgb), ("comp", comp), ("alpha", np.repeat(a, 3, -1))):
             name = f"sm_{tag}_{f:05d}_{kind}.jpg"
@@ -718,7 +783,7 @@ class Final(io.ComfyNode):
             io.Image.Input("native_plate", optional=True), io.Int.Input("native_start", default=0, optional=True),
             io.Mask.Input("tiles", optional=True), io.Mask.Input("coverage", optional=True),
             io.Int.Input("tile_count", default=0, optional=True),
-        ], [io.Mask.Output("alpha"), io.Image.Output("comp")], output_node=True)
+        ], [io.Mask.Output("alpha"), io.Image.Output("comp"), io.String.Output("info")], output_node=True)
 
     @classmethod
     def execute(cls, plate, ltx, selection, refined, others, near_px, filename_prefix, format, first_frame,
@@ -770,7 +835,84 @@ class Final(io.ComfyNode):
                         tiles=int(tile_count))
         # previews stay proxy-sized (they are <= 960 px wide anyway)
         ui_out = {"pro_alpha": [info], "previews": _previews(p, alpha, max(1, n // 48))}
-        return io.NodeOutput(torch.from_numpy(out), comp_t, ui=ui_out)
+        return io.NodeOutput(torch.from_numpy(out), comp_t, json.dumps(info), ui=ui_out)
+
+
+EDGE_NOTE = "perfect: Clean Plate LoRA not found, ran quick"
+
+
+class EdgeColour(io.ComfyNode):
+    """v15: the subject's own colour in the soft edges (quick: Blur-Fusion + texture extend; perfect: clean plate
+    unmix), in linear light. Writes rgba_ files next to the alpha and the clean premultiplied comp. Never changes
+    the alpha. Its own stage, so switching quick/perfect does not re-run Final."""
+    RADIUS = 2  # temporal smoothing: frames before and after
+
+    @classmethod
+    def define_schema(cls):
+        return _schema("ComfyProAlpha_EdgeColour", [
+            io.Image.Input("images"), io.Int.Input("start", default=0), io.Mask.Input("alpha"),
+            io.String.Input("info", default="{}"), io.Combo.Input("mode", options=["quick", "perfect"]),
+            io.String.Input("filename_prefix", default="comfy_pro_alpha/shot"),
+            io.Combo.Input("format", options=["png16", "exr"]), io.Int.Input("first_frame", default=1),
+            io.Boolean.Input("comp", default=True),
+            io.Image.Input("clean_plate", optional=True), io.Mask.Input("others", optional=True),
+        ], [io.Image.Output("comp")], output_node=True)
+
+    @classmethod
+    def execute(cls, images, start, alpha, info, mode, filename_prefix, format, first_frame, comp=True,
+                clean_plate=None, others=None):
+        A = _h(alpha)
+        n, H, W = A.shape
+        P = _h(images)[start:start + n]
+        if P.shape[1] < H or P.shape[2] < W:
+            raise ValueError(f"edge colour: plate {P.shape[2]}x{P.shape[1]} is smaller than the alpha {W}x{H}")
+        P = P[:, :H, :W]
+        ran, note = "quick", ""
+        if mode == "perfect":
+            if clean_plate is None:
+                note = EDGE_NOTE
+            else:
+                ran = "perfect"
+        s = max(W, H) / 1920  # pixel scale vs 1080p, the same for portrait plates
+        out_dir = os.path.join(folder_paths.get_output_directory(), filename_prefix)
+        os.makedirs(out_dir, exist_ok=True)
+        comp_t = torch.empty((n, H, W, 3), dtype=torch.float32) if comp else torch.zeros(1, 64, 64, 3)
+        every = max(1, n // 48)
+        size = (min(960, W), int(min(960, W) * H / W))
+        small = {}
+        raw = {}  # frame -> (unsmoothed F, linear; grey plate for the flow), only the sliding window is kept
+
+        C = _h(clean_plate) if ran == "perfect" else None
+        O = _h(others) if others is not None and ran == "perfect" else None
+
+        def frame(f):
+            if f not in raw:
+                I = E.srgb_to_linear(P[f])
+                F = E.quick_colour(I, A[f], s)
+                if C is not None:  # perfect: unmix against the clean plate (made on the proxy: scale it up)
+                    c = C[f].astype(np.float32) / 255 if C.dtype == np.uint8 else C[f]
+                    B = E.srgb_to_linear(cv2.resize(E._f32(c), (W, H), interpolation=cv2.INTER_CUBIC))
+                    B = E.match_clean(B, I, A[f], s)
+                    o = None if O is None else cv2.resize(E._f32(O[f]), (W, H), interpolation=cv2.INTER_LINEAR)
+                    F = E.unmix_colour(I, A[f], B, F, E.clean_confidence(B, I, A[f], o, s))
+                raw[f] = (F, E.to_gray(P[f:f + 1])[0])
+            return raw[f]
+
+        for f in range(n):
+            lo, hi = max(0, f - cls.RADIUS), min(n, f + cls.RADIUS + 1)
+            win = list(range(lo, hi))
+            F = E.smooth_colour([frame(k)[0] for k in win], [A[k] for k in win],
+                                np.stack([frame(k)[1] for k in win]), cls.RADIUS, index=f - lo)
+            for k in [k for k in raw if k < f - cls.RADIUS]:
+                del raw[k]
+            a = E._f32(A[f])
+            _save_rgba(F, a, out_dir, format, first_frame + f)
+            if comp:
+                comp_t[f] = torch.from_numpy(E.linear_to_srgb(F * a[..., None]))
+            if f % every == 0:
+                small[f] = cv2.resize(F, size, interpolation=cv2.INTER_AREA)
+        ui_info = {**json.loads(info or "{}"), "edge_colour": ran, "edge_note": note}
+        return io.NodeOutput(comp_t, ui={"pro_alpha": [ui_info], "previews": _previews(P, A, every, clean=small)})
 
 
 # ------------------------------------------------------------------ detection report (for the picker UI)
@@ -833,5 +975,5 @@ class PartReport(io.ComfyNode):
 
 
 NODES = [Plate, LoadVideo, Frame, PlateProxy, TrackMasks, MaskMax, EmptyPrompt, Refine, Isolate, Depth, ChunkPad, AttnChunk,
-         DecodeAlpha, Stitch, Proxy, NativeIsolate, TileGuide, DecodeStitch, TileMerge, NativeEdges, Final,
+         DecodeAlpha, Stitch, Proxy, NativeIsolate, TileGuide, DecodeStitch, DecodeStitchRGB, TileMerge, NativeEdges, Final, EdgeColour,
          DetectReport, PartReport]
