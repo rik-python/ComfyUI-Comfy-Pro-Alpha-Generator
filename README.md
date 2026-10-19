@@ -16,8 +16,10 @@ SAM3 decides *what* to matte. LTX-2.5 alpha-gen decides *how the edge looks*.
 </div>
 
 <div align="center">
-
 <video src="https://github.com/user-attachments/assets/d46daf53-44c3-4100-ac01-b107c479f330" width="480" controls muted></video>
+</div>
+
+<div align="center">
 
 **[Quick start](#quick-start)** · **[Results](#results)** · **[How it works](#how-it-works)** · **[Settings](#settings-guide)** · **[Install](#install)** · **[Hardware](#hardware)**
 
