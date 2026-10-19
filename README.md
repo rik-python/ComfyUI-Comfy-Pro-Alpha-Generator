@@ -15,31 +15,30 @@ SAM3 decides *what* to matte. LTX-2.5 alpha-gen decides *how the edge looks*.
 
 </div>
 
+<div align="center">
+
+<video src="https://github.com/user-attachments/assets/d46daf53-44c3-4100-ac01-b107c479f330" width="480" controls muted></video>
+
+**[Quick start](#quick-start)** · **[Results](#results)** · **[How it works](#how-it-works)** · **[Settings](#settings-guide)** · **[Install](#install)** · **[Hardware](#hardware)**
+
+</div>
+
+**One ComfyUI node that mattes one chosen person with generative-quality edges.** Click the subject on the plate:
+SAM3 tracks it, LTX-2.5 alpha-gen draws the hair, and you get a 16-bit alpha plus a clean premultiplied comp.
+Native 4K, EXR in and out, plate frame numbers kept, 12 GB VRAM.
+
+### Quick start
+
+1. **Install.** ComfyUI Manager > **Install via Git URL** > `https://github.com/rik-python/ComfyUI-Comfy-Pro-Alpha-Generator.git`,
+   plus [ComfyUI-SAM3](https://github.com/PozzettiAndrea/ComfyUI-SAM3) and [ComfyUI-LTXVideo](https://github.com/Lightricks/ComfyUI-LTXVideo). Restart ComfyUI.
+2. **Models.** Accept the two Lightricks licenses on Hugging Face and download the models ([list and folders](#install)).
+3. **Matte.** Open `example_workflow.json`, click **Load plate**, click your subject, then **Preview 49 frames**.
+
+Already installed? Update to v0.5.1 from the ComfyUI Manager.
+
 ![LTX alone vs SAM3 vs ONYX-style vs Comfy Pro Alpha Generator on the same frame](docs/images/hero_compare.jpg)
 
 <sub>Task: matte the middle kid only. **LTX alpha-gen alone** has perfect hair but mattes all three kids, and there is no way to tell it which one. **SAM3** and **ONYX-style** pick the right kid but lose the strands. **Comfy Pro Alpha Generator** does both. Top: matte over checker. Below: hair zoom as alpha, then comped over green.</sub>
-
-
-### New in v0.5
-
-<div align="center">
-<video src="https://github.com/user-attachments/assets/d46daf53-44c3-4100-ac01-b107c479f330" width="480" controls muted></video>
-
-<sub>2 min tour: what's new, native 4K alpha, overlap mode, clean edge colour. Real plates and real node output.</sub>
-</div>
-
-<p align="center">
-<img src="docs/images/wipe_edge.gif" width="400" alt="wipe: plate colour vs v0.5.1 edge colour in her flyaways">
-<img src="docs/images/wipe_fingers.gif" width="400" alt="wipe: fingers crossing the subject, v12 vs overlap mode">
-</p>
-
-| | What you get |
-|---|---|
-| **Clean edge colour** | The sky and grass the hair was shot against no longer come along into your comp. Saves a clean premultiplied comp (`rgba_` EXR or PNG) next to the alpha. On by default. [More](#clean-edge-colour-v15) |
-| **Native 4K alpha** | 4K plates are matted at 4K: native 1920x1088 tiles along the subject's edge, not a 1080p matte scaled up. [More](#true-4k-strand-detail-v14) |
-| **Overlap mode** | When someone's hand or hair crosses your subject, every finger and curl gets its own generative edge. [More](#overlap-mode-v13) |
-
-Already installed? Update to v0.5.1 from the ComfyUI Manager.
 
 ---
 
@@ -173,6 +172,14 @@ to 0.067 (41% less).
 
 Type a word (`dog`, `red car`, `bike`) or click anything in the frame. The others are excluded automatically,
 including the same class: the white dog out of four, the bike without its rider.
+
+### New in v0.5
+
+| | What you get |
+|---|---|
+| **Clean edge colour** | The sky and grass the hair was shot against no longer come along into your comp. Saves a clean premultiplied comp (`rgba_` EXR or PNG) next to the alpha. On by default. [More](#clean-edge-colour-v15) |
+| **Native 4K alpha** | 4K plates are matted at 4K: native 1920x1088 tiles along the subject's edge, not a 1080p matte scaled up. [More](#true-4k-strand-detail-v14) |
+| **Overlap mode** | When someone's hand or hair crosses your subject, every finger and curl gets its own generative edge. [More](#overlap-mode-v13) |
 
 ---
 
@@ -394,6 +401,9 @@ favours LTX-like edges.
 
 <p align="center"><img src="docs/images/settings_overlap.png" width="880" alt="overlap mode settings: what each slider does at each end"></p>
 
+<details>
+<summary><b>Full table: overlap mode settings and their Advanced tuning</b></summary>
+
 **v13 settings** (always listed, greyed out until the switch is on):
 
 | Setting | Default | What it does | Turn it... |
@@ -415,6 +425,11 @@ change them only to fix a specific problem:
 | **v13 invented-limb cap (px)** | 90 | LTX draws parts of the subject it can't see; that's how it fills in behind others. Anything further than this from the subject's SAM3 mask is removed, fading over the last 40 px. Stops invented arms. | **Raise (150 to 250)** if real edges far from the SAM3 mask get cut: big hair, a scarf, a raised hand SAM3 missed (an add click is the better fix). **Lower (60)** if a faint extra limb or ghost appears beside the subject. |
 | **v13 front/back smoothing (frames)** | 3 | Averages the front/behind decision over this many frames so it can't pop. | **Raise to 5** if an overlap edge flickers between in front and behind. **1** for very fast action where 3 frames lag behind a quick hand. |
 
+</details>
+
+<details>
+<summary><b>Troubleshooting: overlap mode and 4K plates</b></summary>
+
 **When something is wrong in v13:**
 
 | You see | Cause | Fix |
@@ -435,9 +450,14 @@ change them only to fix a specific problem:
 | Edges against another person look 1080p-soft | By design: near other people the proxy result is kept. | Nothing to fix; those edges come from the proxy pass. |
 | Thick hair looks the same on and off | Its edge is already resolved at 1080p. | Switch native edges off on that shot to save time. |
 
+</details>
+
 ### All other settings
 
 <p align="center"><img src="docs/images/settings_advanced.png" width="880" alt="advanced settings: what each slider does at each end"></p>
+
+<details>
+<summary><b>Full table: all other settings</b></summary>
 
 **Main**
 
@@ -466,6 +486,8 @@ change them only to fix a specific problem:
 | `temporal smoothing (frames)` | 2 | Smooths the SAM3/ViTMatte parts over 2 frames each side, warped by optical flow. LTX edges are already steady. | **Raise to 3 or 4** if ViTMatte edges (props, the v12 zone between people) chatter. **0** for very fast motion if those edges lag or ghost. |
 | `sam3_threshold` | 0.3 | How confident SAM3 must be to keep tracking a pick through the shot. | **Lower (0.2)** if the subject or a part drops out of the matte in dark, blurred or small frames. **Raise (0.4 to 0.5)** if the track jumps onto something else. |
 | `fast_attention` | on | Comfy Kitchen int8 attention: about 36% faster, edge difference 0.004. | Leave on. The node falls back to PyTorch attention by itself when Comfy Kitchen is unavailable. |
+
+</details>
 
 <p align="center"><img src="docs/images/settings_pick.png" width="880" alt="picking the subject, a real Shift-click add, and the output settings"></p>
 
@@ -503,6 +525,9 @@ GPUs work. The weights then wait in system RAM, about 24 GB, unless ComfyUI also
 
 **Disk streaming is the low-RAM switch.** It turns on by itself when the model sits on a fast NVMe SSD; on other
 drives add `--fast-disk` to ComfyUI's launch arguments. The log line `Model storage policy: fast_disk=True` confirms it.
+
+<details>
+<summary><b>Measured: RAM and time per setup, 4K plates, edge colour cost, GGUF</b></summary>
 
 | Setup (dogs preview, 49 frames, Best, RTX 5090) | Peak RAM | Time | Matte |
 |---|---|---|---|
@@ -546,6 +571,8 @@ colour, and LTX invents the background's fine texture anyway.
 model list, e.g. `LTX-2.5-Distilled-Q4_K_M.gguf` (15 GB, [realrebelai/LTX-2.5_GGUFs](https://huggingface.co/realrebelai/LTX-2.5_GGUFs)).
 Use it only to save disk space: GGUF can't be streamed from disk, so it needs *more* RAM (27 vs 21 GB) and runs about
 30% slower. Edge difference 0.05; it looks the same.
+
+</details>
 
 <sub><code>// 07 · install</code></sub>
 
