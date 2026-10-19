@@ -360,7 +360,7 @@ each stage is cached, so changing a late setting (format, the v13 options, tempo
 <img src="docs/images/wipe_hair.gif" width="440" alt="wipe: hair crossing the subject, v12 vs v13">
 </p>
 
-<sub>Matte the man in the striped shirt, comped over green. Left of the line is **Best (v12)**, right is **Overlap
+<sub>Matte the man in the striped shirt, comped over navy with v15 edge colour on both sides. Left of the line is **Best (v12)**, right is **Overlap
 mode (v13)**. **Fingers:** his friend's waving hand crosses his chest; v12 gives a soft blob with the shirt showing
 through the fingertips, v13 cuts each finger out cleanly. **Hair:** her curls fall over his shoulder; v12 cuts his
 shoulder off along a smooth line, v13 cuts her curls out of his shirt and keeps the shoulder underneath.</sub>
