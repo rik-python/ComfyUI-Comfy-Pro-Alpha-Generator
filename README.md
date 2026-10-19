@@ -188,14 +188,21 @@ flowchart LR
     S --> I["Isolated plate<br/>others inpainted out"]
     P --> I
     I --> L2["LTX-2.5 alpha-gen<br/>pass 2: subject alone"]
+    S -.->|overlap mode| O["v13 overlap passes<br/>real plate, one mask per person<br/>+ depth for who is in front"]
     L1 --> B{"v12 blend<br/>+ coverage fallback"}
     L2 --> B
     R --> B
-    B --> A([16-bit alpha + QC])
+    O -.-> B
+    B --> N["v14 native 4K tiles<br/>LTX on 1920x1088 tiles<br/>plates over 1080p only"]
+    N --> E["v15 edge colour<br/>quick: colour pushed out from inside<br/>perfect: LTX Clean Plate, then unmix"]
+    E --> A([16-bit alpha + QC<br/>+ clean premultiplied comp])
     style B fill:#12122a,stroke:#9a75ea,color:#ececf6
     style L1 stroke:#63b3ed
     style L2 stroke:#63b3ed
     style S stroke:#f6a94a
+    style O stroke:#63b3ed,stroke-dasharray: 5 5
+    style N stroke:#63b3ed,stroke-dasharray: 5 5
+    style E stroke:#6edca0
     style A fill:#9a75ea,stroke:#9a75ea,color:#12122a
 ```
 
@@ -227,6 +234,12 @@ the subject's edge get their own LTX pass, with the other subjects painted out a
 proxy result inside the subject, near other people, and wherever a tile disagrees with it over an area (a tile only
 sees part of the subject, so its big decisions are worse); everywhere else the tiles supply the strands. Which tiles
 are needed is only known once SAM3 has tracked the subject, so that stage expands into its LTX passes at run time.
+
+**Clean edge colour (v15)** runs last, on the finished alpha. Every soft edge pixel still holds some of the
+background it was shot against, so it rebuilds the subject's own colour there. **Quick** pushes the colour from the
+solid inside outward over the soft edge (only near the real background) and keeps the plate's brightness for texture.
+**Perfect** also runs LTX-2.5 Clean Plate to rebuild the background, then subtracts it (`F = (I - (1 - a) B) / a`)
+wherever that clean plate checks out. The alpha is never changed; the result is saved as `rgba_` files.
 
 <details>
 <summary><b>Engineering notes</b></summary>
