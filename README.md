@@ -324,6 +324,10 @@ Every setting, what it changes, and when to touch it. The defaults are the value
 shots, so **start with the defaults and change one thing at a time**. Re-rendering is cheap after the first run:
 each stage is cached, so changing a late setting (format, the v13 options, temporal smoothing) reuses the LTX passes.
 
+<p align="center"><img src="docs/images/settings_node.png" width="880" alt="the real node in ComfyUI with each group of settings labelled"></p>
+
+<p align="center"><img src="docs/images/settings_main.png" width="880" alt="settings guide: quality, overlap mode, native edges, edge colour, each off and on"></p>
+
 ### Pick your mode first
 
 | Your shot | Mode | Why |
@@ -375,6 +379,8 @@ The flicker rise comes from the overlap edges: sharp fingers and curls that move
 line that doesn't. Check it in motion on your shot. The synthetic ground truth was built from LTX mattes, so it
 favours LTX-like edges.
 
+<p align="center"><img src="docs/images/settings_overlap.png" width="880" alt="overlap mode settings: what each slider does at each end"></p>
+
 **v13 settings** (always listed, greyed out until the switch is on):
 
 | Setting | Default | What it does | Turn it... |
@@ -418,6 +424,8 @@ change them only to fix a specific problem:
 
 ### All other settings
 
+<p align="center"><img src="docs/images/settings_advanced.png" width="880" alt="advanced settings: what each slider does at each end"></p>
+
 **Main**
 
 | Setting | Default | What it does | When to change it |
@@ -445,6 +453,8 @@ change them only to fix a specific problem:
 | `temporal smoothing (frames)` | 2 | Smooths the SAM3/ViTMatte parts over 2 frames each side, warped by optical flow. LTX edges are already steady. | **Raise to 3 or 4** if ViTMatte edges (props, the v12 zone between people) chatter. **0** for very fast motion if those edges lag or ghost. |
 | `sam3_threshold` | 0.3 | How confident SAM3 must be to keep tracking a pick through the shot. | **Lower (0.2)** if the subject or a part drops out of the matte in dark, blurred or small frames. **Raise (0.4 to 0.5)** if the track jumps onto something else. |
 | `fast_attention` | on | Comfy Kitchen int8 attention: about 36% faster, edge difference 0.004. | Leave on. The node falls back to PyTorch attention by itself when Comfy Kitchen is unavailable. |
+
+<p align="center"><img src="docs/images/settings_pick.png" width="880" alt="picking the subject, a real Shift-click add, and the output settings"></p>
 
 **Picker actions** (in the viewer)
 
