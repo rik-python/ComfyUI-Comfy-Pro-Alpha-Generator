@@ -23,7 +23,7 @@ SAM3 decides *what* to matte. LTX-2.5 alpha-gen decides *how the edge looks*.
 ### New in v0.5
 
 <div align="center">
-<video src="https://github.com/user-attachments/assets/ba6ad95f-89ff-4b18-a05f-1883a654c4f0" width="480" controls muted></video>
+<video src="https://github.com/user-attachments/assets/d46daf53-44c3-4100-ac01-b107c479f330" width="480" controls muted></video>
 
 <sub>2 min tour: what's new, native 4K alpha, overlap mode, clean edge colour. Real plates and real node output.</sub>
 </div>
