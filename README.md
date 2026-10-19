@@ -137,9 +137,9 @@ worse there. RAM grows with shot length (see [Hardware](#hardware)).
 <sub>UHD 4K plate, matte over navy, the same shot as above. Left of the line: the plate's own colour in her flyaways
 (the grass behind her shows through each strand). Right: v0.5.1 quick edge colour, the alpha unchanged.</sub>
 
-<p align="center"><img src="docs/images/edge_colour.jpg" width="760" alt="edge colour off, quick, perfect over green"></p>
+<p align="center"><img src="docs/images/edge_colour.jpg" width="760" alt="edge colour off, quick, perfect over navy"></p>
 
-<sub>Subject comped over green, 2x zoom. Off: the plate's own colour stays in the soft edge, so the sky behind the
+<sub>Subject comped over navy, 2x zoom. Off: the plate's own colour stays in the soft edge, so the sky behind the
 sleeve shows as a white halo and the grass as a lime line down the shirt. Quick and perfect rebuild the subject's
 colour there.</sub>
 
