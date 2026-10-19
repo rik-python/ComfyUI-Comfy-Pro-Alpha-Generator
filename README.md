@@ -140,7 +140,7 @@ worse there. RAM grows with shot length (see [Hardware](#hardware)).
 <p align="center"><img src="docs/images/edge_colour.jpg" width="760" alt="edge colour off, quick, perfect over navy"></p>
 
 <sub>Subject comped over navy, 2x zoom. Off: the plate's own colour stays in the soft edge, so the sky behind the
-sleeve shows as a white halo and the grass as a lime line down the shirt. Quick and perfect rebuild the subject's
+hat shows as a bright white rim around the brim, and the grass as a lime line down the shirt. Quick and perfect rebuild the subject's
 colour there.</sub>
 
 The alpha was right, but every soft edge still carried the background it was shot against: sky in the strands, grass
