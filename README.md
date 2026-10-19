@@ -19,6 +19,22 @@ SAM3 decides *what* to matte. LTX-2.5 alpha-gen decides *how the edge looks*.
 
 <sub>Task: matte the middle kid only. **LTX alpha-gen alone** has perfect hair but mattes all three kids, and there is no way to tell it which one. **SAM3** and **ONYX-style** pick the right kid but lose the strands. **Comfy Pro Alpha Generator** does both. Top: matte over checker. Below: hair zoom as alpha, then comped over green.</sub>
 
+
+### New in v0.5
+
+<p align="center">
+<img src="docs/images/wipe_edge.gif" width="400" alt="wipe: plate colour vs v0.5.1 edge colour in her flyaways">
+<img src="docs/images/wipe_fingers.gif" width="400" alt="wipe: fingers crossing the subject, v12 vs overlap mode">
+</p>
+
+| | What you get |
+|---|---|
+| **Clean edge colour** | The sky and grass the hair was shot against no longer come along into your comp. Saves a clean premultiplied comp (`rgba_` EXR or PNG) next to the alpha. On by default. [More](#clean-edge-colour-v15) |
+| **Native 4K alpha** | 4K plates are matted at 4K: native 1920x1088 tiles along the subject's edge, not a 1080p matte scaled up. [More](#true-4k-strand-detail-v14) |
+| **Overlap mode** | When someone's hand or hair crosses your subject, every finger and curl gets its own generative edge. [More](#overlap-mode-v13) |
+
+Already installed? Update to v0.5.1 from the ComfyUI Manager.
+
 ---
 
 <sub><code>// 01 · problem</code></sub>
@@ -110,6 +126,11 @@ worse there. RAM grows with shot length (see [Hardware](#hardware)).
 
 ### Clean edge colour (v15)
 
+<p align="center"><img src="docs/images/wipe_edge.gif" width="540" alt="wipe: plate colour vs v0.5.1 edge colour in her flyaways"></p>
+
+<sub>UHD 4K plate, matte over navy, the same shot as above. Left of the line: the plate's own colour in her flyaways
+(the grass behind her shows through each strand). Right: v0.5.1 quick edge colour, the alpha unchanged.</sub>
+
 <p align="center"><img src="docs/images/edge_colour.jpg" width="760" alt="edge colour off, quick, perfect over green"></p>
 
 <sub>Subject comped over green, 2x zoom. Off: the plate's own colour stays in the soft edge, so the sky behind the
@@ -124,6 +145,9 @@ outputs a **clean premultiplied comp**, saved next to the alpha as `rgba_` files
 |---|:---:|:---:|:---:|
 | Background left in the edge (lower = cleaner) | 0.159 | **0.056** | 0.062 |
 | Edge colour flicker (lower = steadier) | 0.064 | **0.021** | 0.028 |
+
+On the 4K shot above (v0.5.1 quick, 25 frames across the shot), the background left in the edge drops from 0.113
+to 0.067 (41% less).
 
 - **Quick** works like an eroded EdgeExtend in Nuke: the colour comes from 2 px inside the subject and is pushed
   outward over the soft edge; the plate's brightness is kept for texture (stripes, strands), limited to the
