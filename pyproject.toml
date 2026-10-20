@@ -16,7 +16,7 @@ Documentation = "https://github.com/rik-python/ComfyUI-Comfy-Pro-Alpha-Generator
 "Bug Tracker" = "https://github.com/rik-python/ComfyUI-Comfy-Pro-Alpha-Generator/issues"
 
 [tool.comfy]
-PublisherId = "comfycompositing"
+PublisherId = "rikinpatel"
 DisplayName = "Comfy Pro Alpha Generator"
 Icon = "https://raw.githubusercontent.com/rik-python/ComfyUI-Comfy-Pro-Alpha-Generator/main/docs/images/icon.png"
 Banner = "https://raw.githubusercontent.com/rik-python/ComfyUI-Comfy-Pro-Alpha-Generator/main/docs/images/banner.png"
