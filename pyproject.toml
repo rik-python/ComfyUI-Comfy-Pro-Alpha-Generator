@@ -1,15 +1,22 @@
 [project]
 name = "comfy-pro-alpha-generator"
-description = "Comfy Pro Alpha Generator: one node. SAM3 picks the subject, LTX-2.5 alpha-gen draws hair-level edges."
+description = "One ComfyUI node: click a subject, get a generative-quality alpha with clean edges. SAM3 + LTX-2.5, native 4K, EXR out."
 version = "0.5.1"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = ["opencv-python-headless", "transformers", "huggingface_hub", "av"]
+classifiers = [
+    "Operating System :: OS Independent",
+    "Environment :: GPU :: NVIDIA CUDA",
+]
 
 [project.urls]
 Repository = "https://github.com/rik-python/ComfyUI-Comfy-Pro-Alpha-Generator"
+Documentation = "https://github.com/rik-python/ComfyUI-Comfy-Pro-Alpha-Generator#readme"
+"Bug Tracker" = "https://github.com/rik-python/ComfyUI-Comfy-Pro-Alpha-Generator/issues"
 
 [tool.comfy]
-PublisherId = "rikinpatel"
+PublisherId = "comfycompositing"
 DisplayName = "Comfy Pro Alpha Generator"
-Icon = ""
+Icon = "https://raw.githubusercontent.com/rik-python/ComfyUI-Comfy-Pro-Alpha-Generator/main/docs/images/icon.png"
+Banner = "https://raw.githubusercontent.com/rik-python/ComfyUI-Comfy-Pro-Alpha-Generator/main/docs/images/banner.png"
