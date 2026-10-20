@@ -892,6 +892,7 @@ class EdgeColour(io.ComfyNode):
 
         C = _h(clean_plate) if ran == "perfect" else None
         O = _h(others) if others is not None and ran == "perfect" else None
+        pbar = comfy.utils.ProgressBar(n)  # minutes on the CPU after the matte is saved: show it is still working
 
         def frame(f):
             if f not in raw:
@@ -919,6 +920,7 @@ class EdgeColour(io.ComfyNode):
                 comp_t[f] = torch.from_numpy(E.linear_to_srgb(F * a[..., None]))
             if f % every == 0:
                 small[f] = cv2.resize(F, size, interpolation=cv2.INTER_AREA)
+            pbar.update(1)
         ui_info = {**json.loads(info or "{}"), "edge_colour": ran, "edge_note": note}
         return io.NodeOutput(comp_t, ui={"pro_alpha": [ui_info], "previews": _previews(P, A, every, clean=small)})
 

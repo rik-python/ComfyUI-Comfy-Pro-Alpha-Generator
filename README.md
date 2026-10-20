@@ -36,7 +36,7 @@ Native 4K, EXR in and out, plate frame numbers kept, 12 GB VRAM.
 2. **Models.** Accept the two Lightricks licenses on Hugging Face and download the models ([list and folders](#install)).
 3. **Matte.** Open `example_workflow.json`, click **Load plate**, click your subject, then **Preview 49 frames**.
 
-Already installed? Update to v0.5.1 from the ComfyUI Manager.
+Already installed? Update to v0.5.2 from the ComfyUI Manager.
 
 ![LTX alone vs SAM3 vs ONYX-style vs Comfy Pro Alpha Generator on the same frame](docs/images/hero_compare.jpg)
 

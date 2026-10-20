@@ -13,7 +13,7 @@ import { api } from "../../scripts/api.js";
 const NODE = "ComfyProAlphaGenerator";
 const LEGACY = "SelectiveMatte";  // old node id: workflows saved before the rename
 const TITLE = "Comfy Pro Alpha Generator";
-const VERSION = "0.5.1";
+const VERSION = "0.5.2";
 const ADVANCED = ["text_encoder", "chunk", "overlap", "fast_attention",
     "seed", "control_after_generate", "erode", "dilate", "near_px", "stabilize_radius", "sam3_threshold"];
 const HIDDEN = ["picks", "render"];
@@ -326,11 +326,16 @@ class Picker {
         this.subjects = [];          // detections on picks.detect.frame: {id, box, area, mask, overlay}
         this.parts = {};           // token -> overlay
         this.result = null;        // {info, previews, view}
+        this.pending = null;       // Final's report while edge colour is still running
         this.tab = "pick";
         this.wipe = 0.5;
         this.picks = this.readPicks();
         this.build();
         this.restore();
+        // a run that fails or is cancelled during edge colour must not stay on "still working"
+        const stop = () => { if (this.pending) { this.pending = null; this.render(); } };
+        api.addEventListener("execution_error", stop);
+        api.addEventListener("execution_interrupted", stop);
     }
 
     readPicks() {
@@ -1003,6 +1008,12 @@ class Picker {
     renderResult(g) {
         const res = this.result;
         const r = this.imageRect();
+        if (this.pending) {
+            this.hint.style.background = "#4a3514e6";
+            this.hint.textContent = `Matte saved (${this.pending.frames} frames). Still working: building edge colour ` +
+                `(${this.w.edge_colour?.value}) on the CPU, see the progress bar. The result shows here when it is done.`;
+            return;
+        }
         if (!res || !res.previews.length) { this.hint.textContent = "Run Preview 49 frames or Render full shot to see the result here."; return; }
         const items = res.previews;
         const first = res.info.first_frame - (this.info?.first_frame ?? 1);
@@ -1039,6 +1050,15 @@ class Picker {
     showResult(output) {
         const info = output?.pro_alpha?.[0];
         if (!info) return;
+        // Final reports first, when the matte is saved. With edge colour on, EdgeColour then runs for minutes on the
+        // CPU and reports again (its report has edge_colour): until then say it is still working, not a finished result.
+        if (info.edge_colour == null && (this.w.edge_colour?.value ?? "off") !== "off") {
+            this.pending = info;
+            this.tab = "result";
+            this.render();
+            return;
+        }
+        this.pending = null;
         this.result = { info, previews: output.previews || [], view: this.result?.view || "alpha" };
         this.tab = "result";
         const badge = (label, value, cls) => el("span", `sm-badge ${cls}`, `${label} ${value}`);
