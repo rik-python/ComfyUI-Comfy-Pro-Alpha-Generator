@@ -1,7 +1,7 @@
 [project]
 name = "comfy-pro-alpha-generator"
 description = "One ComfyUI node: click a subject, get a generative-quality alpha with clean edges. SAM3 + LTX-2.5, native 4K, EXR out."
-version = "0.5.2"
+version = "0.5.3"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = ["opencv-python-headless", "transformers", "huggingface_hub", "av"]

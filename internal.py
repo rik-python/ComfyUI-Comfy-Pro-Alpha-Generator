@@ -706,9 +706,7 @@ def _out_dir(prefix):
 def _save(alpha, prefix, fmt, first_frame):
     import cv2
 
-    out_dir = _out_dir(prefix)
-    if fmt == "exr":
-        os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
+    out_dir = _out_dir(prefix)  # EXR: _video sets OPENCV_IO_ENABLE_OPENEXR at import
     for i, a in enumerate(alpha):
         a = E._f32(a)  # v14 native frames are float16: 65535 overflows it
         path = os.path.join(out_dir, f"alpha_{first_frame + i:05d}.{'exr' if fmt == 'exr' else 'png'}")
@@ -731,8 +729,7 @@ def _save_rgba(F, a, out_dir, fmt, frame):
     a = E._f32(a)
     path = os.path.join(out_dir, f"rgba_{frame:05d}.{'exr' if fmt == 'exr' else 'png'}")
     if fmt == "exr":
-        os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
-        rgba = np.dstack([np.clip(F, 0, 1) * a[..., None], a])[..., [2, 1, 0, 3]].astype(np.float32)
+        rgba =np.dstack([np.clip(F, 0, 1) * a[..., None], a])[..., [2, 1, 0, 3]].astype(np.float32)
         ok = cv2.imwrite(path, rgba, [cv2.IMWRITE_EXR_TYPE, cv2.IMWRITE_EXR_TYPE_HALF,
                                       cv2.IMWRITE_EXR_COMPRESSION, cv2.IMWRITE_EXR_COMPRESSION_ZIP])
     else:

@@ -7,10 +7,11 @@ scaled to 8 bit: LTX alpha-gen and SAM3 both work on display-referred images.
 import functools
 import os
 import re
-import subprocess
+from fractions import Fraction
 
 os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")  # read lazily by OpenCV at its first EXR access
 
+import av  # noqa: E402
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
@@ -86,16 +87,16 @@ def proxy_mp4(images, fps, key):
     n, h, w = images.shape[:3]
     # yuv420p needs even sizes: pad by edge replicate (SAM3 masks are cropped back by TrackMasks' resize/crop)
     ph, pw = h % 2, w % 2
-    proc = subprocess.Popen(["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
-                             "-s", f"{w + pw}x{h + ph}", "-r", f"{fps}", "-i", "-", "-c:v", "libx264", "-crf", "12",
-                             "-pix_fmt", "yuv420p", out + ".part.mp4"], stdin=subprocess.PIPE)
-    for i in range(n):
-        f = (images[i].float().clamp(0, 1).cpu().numpy() * 255 + 0.5).astype(np.uint8)
-        if ph or pw:
-            f = np.pad(f, ((0, ph), (0, pw), (0, 0)), mode="edge")
-        proc.stdin.write(np.ascontiguousarray(f).tobytes())
-    proc.stdin.close()
-    if proc.wait() != 0:
-        raise RuntimeError("ffmpeg failed building the SAM3 proxy video")
+    # PyAV (bundled FFmpeg) in-process: no system ffmpeg needed
+    with av.open(out + ".part.mp4", "w") as container:
+        stream = container.add_stream("libx264", rate=Fraction(fps).limit_denominator(1001))
+        stream.width, stream.height, stream.pix_fmt = w + pw, h + ph, "yuv420p"
+        stream.options = {"crf": "12"}
+        for i in range(n):
+            f = (images[i].float().clamp(0, 1).cpu().numpy() * 255 + 0.5).astype(np.uint8)
+            if ph or pw:
+                f = np.pad(f, ((0, ph), (0, pw), (0, 0)), mode="edge")
+            container.mux(stream.encode(av.VideoFrame.from_ndarray(np.ascontiguousarray(f), format="rgb24")))
+        container.mux(stream.encode())  # flush
     os.replace(out + ".part.mp4", out)
     return out

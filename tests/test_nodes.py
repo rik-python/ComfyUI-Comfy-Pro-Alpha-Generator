@@ -176,7 +176,7 @@ def test_edge_colour_quick_writes_rgba_files(pack, out_dirs):
     args = _edge_args(fmt="exr")
     pack.I.EdgeColour.execute(**args)
     d = out_dirs / "out" / "t" / "shot"
-    os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
+    os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
     for fr in (1001, 1002):
         img = cv2.imread(str(d / f"rgba_{fr:05d}.exr"), cv2.IMREAD_UNCHANGED)
         assert img.shape == (32, 48, 4)
