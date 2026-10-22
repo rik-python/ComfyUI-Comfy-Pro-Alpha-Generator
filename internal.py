@@ -820,12 +820,13 @@ class Final(io.ComfyNode):
         # empty. Fall back to the ViTMatte edge wherever LTX does not cover the selection.
         ltx_seen = np.maximum(L, I) if I is not None else L
         alpha, cover = E.ltx_fallback(alpha, ltx_seen, S, R, out=alpha)
-        np.clip(alpha, 0, 1, out=alpha)
+        # a NaN matte pixel whites out the whole layer in a compositor (filters spread it); clip keeps NaN
+        np.clip(np.nan_to_num(alpha, copy=False, nan=0.0), 0, 1, out=alpha)
 
         # v14: a plate bigger than 1920x1088 was matted on a proxy: the output is at the plate's own size
         native = None if native_plate is None else _native_alpha(alpha, tuple(native_plate.shape[1:3]), tiles,
                                                                   coverage, O)
-        out = alpha if native is None else native
+        out = alpha if native is None else np.nan_to_num(native, copy=False, nan=0.0)
         out_dir = _save(out, filename_prefix, format, first_frame) if save else ""
         score = E.qc(E.to_gray(p), S, L, alpha) if qc else {}  # QC on the proxy (as for any 1080p plate)
         if comp:  # only built when the node's comp output is wired (a full 1080p shot is several GB)

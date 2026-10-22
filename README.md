@@ -315,6 +315,8 @@ The node walks you through three steps (**Plate → Subject → Render**) and on
    against the plate, **Show comp** for the comp.
 6. **Render full shot.** The alpha is saved to `ComfyUI/output/<filename_prefix>/alpha_00001.png …`,
    16-bit PNG by default or half-float EXR.
+7. **Next subject?** **New subject** keeps this one's files, clears the picks and renders the next person on the
+   same plate into its own folder (`filename_prefix` becomes `shot_2`, `shot_3`…).
 
 | Mode | What it does |
 |---|---|
@@ -502,6 +504,7 @@ change them only to fix a specific problem:
 | **Alt-click** | **Cut**: someone else's part inside the subject's mask (a hand on the shoulder). |
 | **Ctrl-click** | Remove an add or cut marker. |
 | **Find** | Hard to click? Type a concept: `person`, `dog`, `red car`, `dog, person`. |
+| **New subject** | After a render: matte another subject on the same plate. Keeps the last one's files, clears the picks, renders into `filename_prefix_2`, `_3`… |
 
 Add and cut on the **first frame** the part appears: tracking runs forward from the click.
 

@@ -126,6 +126,13 @@ const ICON = {
     clear: '<path d="M6 6l12 12M18 6L6 18"/>',
     reload: '<path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/>',
     tune: '<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>',
+    next: '<circle cx="9" cy="8" r="3.5"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6M19 8v6M16 11h6"/>',
+};
+
+/** filename_prefix for the next subject: shot -> shot_2 -> shot_3 (its own folder, the last subject's files stay). */
+const nextPrefix = (p) => {
+    const m = /^(.*)_(\d+)$/.exec(p);
+    return m ? `${m[1]}_${+m[2] + 1}` : `${p}_2`;
 };
 
 const SAM3_MISSING = "Needs the ComfyUI-SAM3 node pack: open the Manager > Custom Nodes Manager, search SAM3, install " +
@@ -406,6 +413,10 @@ class Picker {
             this.picks = { cuts: [], adds: [], others: [], detect: this.picks.detect, prompt: this.picks.prompt };
             this.writePicks(); this.render();
         };
+        this.newBtn = btn("quiet", "next", "New subject");
+        this.newBtn.title = "Done with this subject? Keeps its files, clears the picks, and renders the next subject " +
+            "(another person on the same plate) into its own folder (filename_prefix _2, _3...)";
+        this.newBtn.onclick = () => this.newSubject();
         this.previewBtn = btn("", "preview", "Preview 49 frames");
         this.previewBtn.title = "Matte 49 frames from the pick frame (a few minutes) to check the edges first";
         this.previewBtn.onclick = () => this.queue(true);
@@ -413,7 +424,7 @@ class Picker {
         this.runBtn.title = "Matte every frame from the pick frame to the end and save the files";
         this.runBtn.onclick = () => this.queue(false);
         this.actions = el("div", "sm-actions");
-        this.actions.append(this.clearBtn, el("span", "sm-sp"), this.runBtn, this.previewBtn);
+        this.actions.append(this.clearBtn, this.newBtn, el("span", "sm-sp"), this.runBtn, this.previewBtn);
 
         const view = el("div", "sm-view");
         this.canvas = el("canvas");
@@ -578,6 +589,26 @@ class Picker {
         this.syncUI();
     }
 
+    /** Next subject on the same plate: keep the last one's files (its own folder), clear the picks and the result.
+     *  The plate and this frame's detections stay, so the next subject is one click away. */
+    newSubject() {
+        const w = this.w.filename_prefix;
+        const next = nextPrefix(w.value);
+        const kept = this.result?.info?.out_dir || w.value;
+        if (!confirm(`Done with this subject?\n\nIts files stay in ${kept}.\nThe picks are cleared and the next ` +
+                     `subject renders into ${next}.`)) return;
+        w.value = next;
+        this.picks = { cuts: [], adds: [], others: [], detect: this.picks.detect, prompt: this.picks.prompt,
+                       view: this.picks.view };
+        this.parts = {};
+        this.result = null;
+        this.pending = null;
+        this.tab = "pick";
+        this.writePicks();
+        this.node.setDirtyCanvas?.(true, true);
+        this.render();
+    }
+
     /** Show only what the current step needs (first-time users see one next action, never the whole toolbar). */
     syncUI() {
         const plate = !!(this.info && this.img), subject = !!this.picks.target, result = !!this.result;
@@ -600,6 +631,7 @@ class Picker {
         this.scrub.hidden = this.status.hidden = !this.info;
         this.actions.hidden = !plate;
         this.clearBtn.hidden = !subject && !this.picks.cuts.length && !this.picks.adds.length;
+        this.newBtn.hidden = !result;  // once a subject has rendered
         this.previewBtn.disabled = this.runBtn.disabled = !subject;
         // Preview first; once a preview has rendered, the full shot becomes the main action.
         const previewed = result && /_preview$/.test(this.result.info.out_dir || "");

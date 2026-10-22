@@ -163,7 +163,9 @@ def level(ltx, target_soft, others_soft, ramp=6, floor=0.05):
     core = cv2.erode(paint.astype(np.uint8), ellipse(15)).astype(bool)
     g = float(np.median(ltx[core])) if core.any() else 0.0
     near = cv2.GaussianBlur(cv2.dilate(paint.astype(np.uint8), ellipse(15)).astype(np.float32), (0, 0), 4)
-    out = near * np.clip((ltx - g) / (1 - g), 0, 1) + (1 - near) * ltx
+    # g ~ 1: painting the neighbour out failed and LTX mattes it solid. There is no haze to level, and (ltx - g) /
+    # (1 - g) would be 0/0 = NaN at every ltx == 1 pixel (7 of 34 real passes); the paint cut below removes it.
+    out = ltx.copy() if g > 0.95 else near * np.clip((ltx - g) / (1 - g), 0, 1) + (1 - near) * ltx
     d_tgt = cv2.distanceTransform((~tgt).astype(np.uint8), cv2.DIST_L2, 5)
     out *= 1.0 - paint_soft * np.clip((d_tgt - ramp) / 2.0, 0, 1)
     _, labels = cv2.connectedComponents(((out > floor) | tgt).astype(np.uint8), connectivity=8)
