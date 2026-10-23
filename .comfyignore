@@ -1,0 +1,5 @@
+# Left out of the Comfy Registry zip (comfy node publish). Not needed at runtime.
+# tests/: dev-only; its os.environ read got 0.5.3 flagged by the registry scan.
+# docs/: README images (~9 MB); the registry icon/banner load from GitHub.
+tests/
+docs/
