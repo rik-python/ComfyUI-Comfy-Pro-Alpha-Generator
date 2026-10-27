@@ -315,7 +315,7 @@ function aboutPanel() {
     body.append(
         by,
         para("Mattes one chosen subject with generative edge quality. SAM3 picks the subject, LTX-2.5 alpha-gen draws the edge."),
-        para("Free for personal and non-commercial use (PolyForm Noncommercial 1.0.0). Commercial use needs a license from Comfy Compositing."),
+        para("Open source under GPL-3.0. Closed-source commercial licenses are available from Comfy Compositing."),
         links,
     );
     details.append(body);

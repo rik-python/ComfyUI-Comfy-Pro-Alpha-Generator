@@ -11,7 +11,7 @@ SAM3 decides *what* to matte. LTX-2.5 alpha-gen decides *how the edge looks*.
 ![SAM3](https://img.shields.io/badge/SAM3-tracking-12122a?style=flat-square&labelColor=63b3ed)
 ![VRAM](https://img.shields.io/badge/VRAM-12%20GB%2B-12122a?style=flat-square&labelColor=63b3ed)
 ![RAM](https://img.shields.io/badge/RAM-16%20GB%2B-12122a?style=flat-square&labelColor=63b3ed)
-![License](https://img.shields.io/badge/license-free%20non--commercial-12122a?style=flat-square&labelColor=f6a94a)
+![License](https://img.shields.io/badge/license-GPL--3.0-12122a?style=flat-square&labelColor=f6a94a)
 
 </div>
 
@@ -762,9 +762,10 @@ out, and a QC number I can check before anything goes to comp.
 
 ## License
 
-**Free for personal and non-commercial use** under the [PolyForm Noncommercial License 1.0.0](LICENSE).
-**Commercial use** (paid client work, studio or company use, or inside a commercial product or service) needs a
-commercial license: [comfycompositing.com/contact](https://comfycompositing.com/contact).
+**Open source** under the [GNU General Public License v3.0 or later](LICENSE), the same license as ComfyUI. Use it,
+change it and share it, for personal or paid work; if you distribute a modified version, share its source under the
+GPL too. Want to ship this code inside a **closed-source** product or service? A separate commercial license is
+available: [comfycompositing.com/contact](https://comfycompositing.com/contact).
 
 This license covers this node pack's code only. The models and node packs it runs on have their own licenses, and
 you accept those when you download them from their original pages:
@@ -779,7 +780,7 @@ you accept those when you download them from their original pages:
 | Depth Anything V2 Small (overlap mode only) | Depth Anything V2 authors | [Apache-2.0](https://huggingface.co/depth-anything/Depth-Anything-V2-Small-hf) (the Base and Large models are non-commercial and are not used) |
 | ComfyUI | Comfy Org | [GPL-3.0](https://github.com/comfyanonymous/ComfyUI/blob/master/LICENSE) |
 
-A commercial license for this node pack does **not** include rights to these models. For commercial work, check
+Neither the GPL nor a commercial license for this node pack includes rights to these models. For commercial work, check
 each license above as well, in particular the LTX revenue threshold.
 
 **LTX-2.x notice.** This pack runs Lightricks' LTX-2.x model and its alpha-gen and Clean Plate IC-LoRAs; it does not include them.
