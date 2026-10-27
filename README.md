@@ -13,6 +13,8 @@ SAM3 decides *what* to matte. LTX-2.5 alpha-gen decides *how the edge looks*.
 ![RAM](https://img.shields.io/badge/RAM-16%20GB%2B-12122a?style=flat-square&labelColor=63b3ed)
 ![License](https://img.shields.io/badge/license-GPL--3.0-12122a?style=flat-square&labelColor=f6a94a)
 
+**Entry for [Comfy Org's Open Source Higgsfield](https://comfy.org/open-source-higgsfield/)** · VFX Workflow Built with LTX · open source, open weights only
+
 </div>
 
 <div align="center">
@@ -36,11 +38,25 @@ Native 4K, EXR in and out, plate frame numbers kept, 12 GB VRAM.
 2. **Models.** Accept the two Lightricks licenses on Hugging Face and download the models ([list and folders](#install)).
 3. **Matte.** Open `example_workflow.json`, click **Load plate**, click your subject, then **Preview 49 frames**.
 
-Already installed? Update to v0.5.4 from the ComfyUI Manager.
+Already installed? Update to v0.5.5 from the ComfyUI Manager.
 
 ![LTX alone vs SAM3 vs ONYX-style vs Comfy Pro Alpha Generator on the same frame](docs/images/hero_compare.jpg)
 
 <sub>Task: matte the middle kid only. **LTX alpha-gen alone** has perfect hair but mattes all three kids, and there is no way to tell it which one. **SAM3** and **ONYX-style** pick the right kid but lose the strands. **Comfy Pro Alpha Generator** does both. Every matte comped over navy with the same edge colour, so only the matte differs.</sub>
+
+### Why it's new
+
+- **Generative matting you can aim.** LTX-2.5 alpha-gen draws hair no other matte gets, but it mattes everyone in
+  the frame. Here SAM3 picks the one subject, the other people are inpainted out of a copy of the plate, and LTX
+  draws the edge of the one person left. [How it works](#how-it-works)
+- **Native 4K from a 1080p model.** LTX works at 1920x1088. On bigger plates the node runs it again on native
+  1920x1088 tiles along the subject's edge, so 4K strands are real, not a 1080p matte scaled up. [More](#true-4k-strand-detail-v14)
+- **Overlap mode.** When people cross, three LTX passes plus a depth pass decide who is in front, so every finger
+  and curl gets its own generative edge. [More](#overlap-mode-v13)
+- **Clean edge colour.** The background the hair was shot against no longer comes along into the comp: 41% less
+  of it in the edge on the 4K shot. [More](#clean-edge-colour-v15)
+- **Measured, not claimed.** 88.7% edge detail match against 45.0% (ONYX-style) and 29.4% (SAM3 mask) on the same
+  247-frame shot, and the same QC numbers show on the node after every run. [Results](#results)
 
 ---
 
