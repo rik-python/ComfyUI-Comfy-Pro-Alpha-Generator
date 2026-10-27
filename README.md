@@ -778,6 +778,8 @@ out, and a QC number I can check before anything goes to comp.
 
 ## License
 
+Copyright (c) 2026 Rikin Patel, Comfy Compositing.
+
 **Open source** under the [GNU General Public License v3.0 or later](LICENSE), the same license as ComfyUI. Use it,
 change it and share it, for personal or paid work; if you distribute a modified version, share its source under the
 GPL too. Want to ship this code inside a **closed-source** product or service? A separate commercial license is

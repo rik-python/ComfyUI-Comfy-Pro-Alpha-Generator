@@ -1,27 +1,3 @@
-Comfy Pro Alpha Generator (ComfyUI-SelectiveMatte)
-Copyright (c) 2026 Rikin Patel, Comfy Compositing (https://comfycompositing.com)
-
-This program is free software: you can redistribute it and/or modify it
-under the terms of the GNU General Public License as published by the Free
-Software Foundation, either version 3 of the License, or (at your option)
-any later version. The full license text is below.
-
-This program is distributed in the hope that it will be useful, but WITHOUT
-ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
-more details.
-
-Commercial license: if you want to ship this code inside a closed-source
-product or service without the GPL's obligations, a separate commercial
-license is available from the copyright holder:
-https://comfycompositing.com/contact
-
-This license covers this node pack's own code only. The models it runs
-(LTX-2.5 and its IC-LoRAs, SAM3, ViTMatte, Depth Anything V2 Small) and the
-node packs it depends on have their own licenses; you must follow those too.
-
----
-
                     GNU GENERAL PUBLIC LICENSE
                        Version 3, 29 June 2007
 
