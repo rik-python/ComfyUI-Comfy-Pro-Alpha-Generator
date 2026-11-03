@@ -38,7 +38,7 @@ Native 4K, EXR in and out, plate frame numbers kept, 12 GB VRAM.
 2. **Models.** Accept the two Lightricks licenses on Hugging Face and download the models ([list and folders](#install)).
 3. **Matte.** Open `example_workflow.json`, click **Load plate**, click your subject, then **Preview 49 frames**.
 
-Already installed? Update to v0.5.5 from the ComfyUI Manager.
+Already installed? Update to v0.6.0 from the ComfyUI Manager.
 
 ![LTX alone vs SAM3 vs ONYX-style vs Comfy Pro Alpha Generator on the same frame](docs/images/hero_compare.jpg)
 
@@ -55,8 +55,9 @@ Already installed? Update to v0.5.5 from the ComfyUI Manager.
   and curl gets its own generative edge. [More](#overlap-mode-v13)
 - **Clean edge colour.** The background the hair was shot against no longer comes along into the comp: 41% less
   of it in the edge on the 4K shot. [More](#clean-edge-colour-v15)
-- **Measured, not claimed.** 88.7% edge detail match against 45.0% (ONYX-style) and 29.4% (SAM3 mask) on the same
-  247-frame shot, and the same QC numbers show on the node after every run. [Results](#results)
+- **Measured, not claimed.** On the same 247-frame shot the matte keeps 88.7% of LTX alpha-gen's hair detail,
+  against 45.0% (ONYX-style) and 29.4% (SAM3 mask). The reference is LTX run on the whole plate, not a hand-pulled
+  matte. The same QC numbers show on the node after every run. [Results](#results)
 
 ---
 
@@ -79,6 +80,10 @@ fall into two groups, and each gets half of it right:
 
 Measured on a 247-frame plate (three kids, arms around each other), matting only the middle kid.
 Every method gets the same SAM3 selection.
+
+**What the numbers are measured against:** LTX alpha-gen run on the whole plate. It draws the best hair but mattes
+every kid, so it can't be used as is; the scores show how much of that hair each method keeps for one subject.
+It is not a hand-pulled ground truth, and it favours LTX-based methods (see Methodology).
 
 <p align="center"><img src="docs/images/quality_scatter.png" width="760" alt="edge detail match vs flicker"></p>
 
@@ -134,7 +139,8 @@ More single strands, each thinner, and no grass baked into them.</sub>
 Plates bigger than 1920x1088 are now matted at their own resolution. The node mattes a 1080p proxy exactly as before
 (that pass decides what the subject is), then runs LTX alpha-gen again on native-resolution 1920x1088 tiles along the
 subject's edge and merges them in. Fine hair, flyaways and fur keep single 4K strands instead of a soft 1080p band
-scaled up. Tested on UHD 4K (3840x2160), DCI 4K (4096x2160) and 2K (2048x1080) plates.
+scaled up. The tiles overlap by at least half and are feather-blended where they meet, so a strand that crosses a
+tile border is blended, not cut. Tested on UHD 4K (3840x2160), DCI 4K (4096x2160) and 2K (2048x1080) plates.
 
 | UHD 4K plate, long fine hair, RTX 5090 | 1080p scaled up (switch off) | **Native 4K edges** (on, default) |
 |---|:---:|:---:|
@@ -489,6 +495,8 @@ change them only to fix a specific problem:
 | `quality` | Best (v12) | 2 LTX passes (Best) or 1 (Fast). Greyed out in v13. | Fast for look-dev and triage, Best for finals. |
 | `native-resolution edges (v14)` | on | Plates bigger than 1920x1088: LTX renders the subject's edges again on native 1920x1088 tiles and merges them into the proxy matte. Works with every mode. Greyed out for plates of 1080p or less. | **Off** for a fast first look, when RAM is short on a long 4K shot, or on plates only a little over 1080p (2K): little extra detail there for the full tile cost. Off gives the 1080p matte scaled up, 2 to 3x faster. Leave it **on** for finals with fine hair, fur or flyaways. |
 | `edge colour (v15)` | quick | Rebuilds the subject's colour in the soft edges so the background doesn't show through, and saves `rgba_` files (clean premultiplied comp) next to the alpha. **quick**: classical, a few seconds per frame. **perfect**: adds an LTX Clean Plate pass and subtracts the real background (needs the Clean Plate IC-LoRA). **off**: the raw plate in the edges, as v0.4. The alpha is identical in all three. | **perfect** for finals on wide shots where background shows around the subject. **off** only to reproduce a v0.4 render exactly. |
+| `track backward from the pick frame` | on | Render full shot mattes the whole plate: every pick (subject, adds, cuts, excluded people) is tracked backward to the first frame as well as forward, so you can pick on any frame where the subject is clear. Frames before the subject enters get an empty alpha; plate frame numbers are kept. The preview always starts at the pick frame. | **Off** to start the shot at the pick frame, as before v0.6 (a quick way to skip the start of a long plate). |
+| `matte everyone (skip SAM3)` | off | Plain LTX alpha-gen with no picks and no SAM3: LTX mattes every main subject in the plate. You still get the chunked full shot, native 4K edges, edge colour and EXR with plate frame numbers. The preview starts at the scrubber frame. Quality and overlap mode don't apply. | **On** when you want everyone in frame (a crowd, a band, a single person alone in the shot), or SAM3 isn't installed. |
 | `filename_prefix` | `comfy_pro_alpha/shot` | Output folder under `ComfyUI/output/`. | One per shot (`show/sh010_hero`) so renders don't overwrite each other. |
 | `format` | png16 | 16-bit PNG or half-float EXR. | **exr** for a Nuke/EXR pipeline. Both hold the full soft edge. |
 | model selectors | the recommended files | LTX model, alpha-gen IC-LoRA, Clean Plate IC-LoRA (perfect edge colour only; greyed out otherwise), video VAE (must be the **conv** VAE), audio VAE, ViTMatte. | Only to pick a GGUF (see [Hardware](#hardware)) or a file in another folder. `MISSING:` means the file isn't found. |
@@ -536,6 +544,7 @@ Add and cut on the **first frame** the part appears: tracking runs forward from 
 |---|---|
 | 24 GB+ VRAM, 64 GB+ RAM | Nothing. Use the defaults. |
 | 12 to 24 GB VRAM | Nothing. ComfyUI streams the model to the GPU (tested with 12 GB free, about 5% slower on the same card). |
+| 8 GB VRAM | Not tested here, but a user reports it running on 8 GB VRAM with 32 GB RAM. |
 | 16 to 48 GB RAM | Keep the models on an **NVMe SSD** (ComfyUI then streams them from disk by itself), or add `--fast-disk` to ComfyUI's launch arguments. Split very long shots. |
 | Short on disk space | Optional: pick `LTX-2.5-Distilled-Q4_K_M.gguf` (15 GB) in `LTX-2.5 model`. Needs [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF); uses more RAM and is about 30% slower. |
 
@@ -620,6 +629,10 @@ git clone https://github.com/rik-python/ComfyUI-Comfy-Pro-Alpha-Generator.git
 pip install -r ComfyUI-Comfy-Pro-Alpha-Generator/requirements.txt
 ```
 Restart ComfyUI afterwards.
+
+> **ComfyUI portable: `No module named 'comfy_aimdo.storage'`?** That error comes from ComfyUI itself, not this
+> pack: ComfyUI was updated but its Python packages were not (it needs `comfy-aimdo` 0.5.4 or newer). From the
+> portable folder run `python_embeded\python.exe -m pip install -r ComfyUI\requirements.txt`, then restart.
 
 **2. Required node packs** (ComfyUI Manager can install both):
 - [ComfyUI-SAM3](https://github.com/PozzettiAndrea/ComfyUI-SAM3)
@@ -752,9 +765,9 @@ and ComfyUI itself the same way, then restart. The console line starting with `C
 
 | Works well | Works with care | Doesn't work (yet) |
 |---|---|---|
-| People, hair, animals with fur, vehicles with dust, props | A hand, arm or hair crossing the subject: turn on **overlap mode (v13)**. If the subject's own limb rests on someone and goes missing, add a click on it | Frames before the pick frame |
-| Busy shots with several people (the others are painted out) | Background objects (a parked car): LTX mattes what it reads as the main subject; the **LTX cover** badge goes red and ViTMatte takes over | A subject fully hidden mid-shot (a car driving in front): SAM3 can lose the track. Pick after the occlusion or split the shot |
-| Video files and EXR/PNG/TIF sequences | More than 8 other subjects near the target: only the nearest 8 are painted out (each costs about 14 s) | Despill of light the subject really reflects (green bounce on skin from grass): edge colour only removes the background seen *through* soft edges. Despill in comp |
+| People, hair, animals with fur, vehicles with dust, props | A hand, arm or hair crossing the subject: turn on **overlap mode (v13)**. If the subject's own limb rests on someone and goes missing, add a click on it | A subject fully hidden mid-shot (a car driving in front): SAM3 can lose the track. Pick after the occlusion or split the shot |
+| Busy shots with several people (the others are painted out) | Background objects (a parked car): LTX mattes what it reads as the main subject; the **LTX cover** badge goes red and ViTMatte takes over | Despill of light the subject really reflects (green bounce on skin from grass): edge colour only removes the background seen *through* soft edges. Despill in comp |
+| Video files and EXR/PNG/TIF sequences | More than 8 other subjects near the target: only the nearest 8 are painted out (each costs about 14 s) | |
 | 12 GB VRAM, 16 GB RAM machines (slower) | | |
 
 **Not tested yet:** plates smaller than 1080p, vertical video, heavy motion blur, AMD and Apple GPUs.

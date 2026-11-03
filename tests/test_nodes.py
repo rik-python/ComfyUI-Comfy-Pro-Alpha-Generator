@@ -239,14 +239,16 @@ class _Prompt:
         return self.nodes[nid]
 
 
-def _gen_graph(monkeypatch, edge_colour=None, comp_wired=False, size=(1920, 1080), frame=0, **kw):
+def _gen_graph(monkeypatch, edge_colour=None, comp_wired=False, size=(1920, 1080), frame=0, render="full shot",
+               picks=None, **kw):
     gen = sys.modules["cpa_pack.node"].ComfyProAlphaGenerator
     monkeypatch.setattr(gen, "hidden", types.SimpleNamespace(dynprompt=_Prompt(comp_wired), unique_id="5"),
                         raising=False)
     W, H = size
     args = dict(images=torch.zeros((1, 1, 1, 3)).expand(20, H, W, 3), fps=24.0, first_frame=1001,
-                quality="Best (v12, 2 LTX passes)", render="full shot",
-                picks=json.dumps({"target": {"frame": frame, "x": 100, "y": 100}}), filename_prefix="t/shot",
+                quality="Best (v12, 2 LTX passes)", render=render,
+                picks=json.dumps({"target": {"frame": frame, "x": 100, "y": 100}} if picks is None else picks),
+                filename_prefix="t/shot",
                 format="png16", ltx_model="ltx.safetensors", alpha_lora="alpha.safetensors",
                 text_encoder="built-in empty prompt (no text encoder needed)", video_vae="vae.safetensors",
                 audio_vae="avae.safetensors", vitmatte="auto-download", chunk=9, overlap=0, seed=1, erode=10,
@@ -270,7 +272,7 @@ def test_graph_off_is_v041(pack, monkeypatch):
 
 
 def test_graph_quick_adds_edge_colour(pack, monkeypatch):
-    res, graph = _gen_graph(monkeypatch, "quick", comp_wired=True, frame=4)
+    res, graph = _gen_graph(monkeypatch, "quick", comp_wired=True, frame=4, track_backward=False)
     (eid, ec), = _of(graph, "ComfyProAlpha_EdgeColour")
     (fid, final), = _of(graph, "ComfyProAlpha_Final")
     assert ec["inputs"]["images"] == ["1", 0] and ec["inputs"]["start"] == 4
@@ -283,6 +285,108 @@ def test_graph_quick_adds_edge_colour(pack, monkeypatch):
 def test_graph_default_is_quick(pack, monkeypatch):
     _, graph = _gen_graph(monkeypatch)  # an old workflow without the widget
     assert len(_of(graph, "ComfyProAlpha_EdgeColour")) == 1
+
+
+# ------------------------------------------------------------------ v0.6 backward tracking
+
+def _props(graph):
+    return sorted((n["inputs"]["direction"], n["inputs"]["start_frame"], n["inputs"]["end_frame"])
+                  for _, n in _of(graph, "SAM3Propagate"))
+
+
+def test_track_masks_merges_backward_pass(pack):
+    one = lambda v: torch.full((1, 4, 6), v)
+    fwd = {"2": one(1.0), "3": one(1.0)}
+    back = {"0": one(0.5), "1": one(0.5), "2": one(0.25)}  # a backward pass that also returns the prompt frame
+    (m,) = pack.I.TrackMasks.execute(fwd, 0, 4, 6, 4, masks_back=back).result
+    assert [float(m[t].max()) for t in range(4)] == [0.5, 0.5, 1.0, 1.0]  # forward wins on the prompt frame
+    (m,) = pack.I.TrackMasks.execute(fwd, 0, 4, 6, 4).result
+    assert float(m[0].max()) == 0.0  # no backward pass: frames before the prompt stay empty (v0.5)
+
+
+def test_graph_backward_full_shot_mattes_whole_plate(pack, monkeypatch):
+    _, graph = _gen_graph(monkeypatch, "quick", frame=8)  # default: track_backward on
+    assert _props(graph) == [("backward", 8, 16), ("forward", 8, 19)]  # back 8 - 0 + 1 frames, forward to the end
+    (_, tm), = _of(graph, "ComfyProAlpha_TrackMasks")
+    assert tm["inputs"]["start"] == 0 and tm["inputs"]["count"] == 20 and "masks_back" in tm["inputs"]
+    (_, final), = _of(graph, "ComfyProAlpha_Final")
+    (_, ec), = _of(graph, "ComfyProAlpha_EdgeColour")
+    assert final["inputs"]["first_frame"] == 1001 and ec["inputs"]["start"] == 0  # plate frame numbers kept
+
+
+def test_graph_backward_off_starts_at_pick_frame(pack, monkeypatch):
+    _, graph = _gen_graph(monkeypatch, "quick", frame=8, track_backward=False)
+    assert _props(graph) == [("forward", 8, 19)]
+    (_, tm), = _of(graph, "ComfyProAlpha_TrackMasks")
+    assert tm["inputs"]["start"] == 8 and tm["inputs"]["count"] == 12 and "masks_back" not in tm["inputs"]
+
+
+def test_graph_backward_preview_starts_at_pick_frame(pack, monkeypatch):
+    _, graph = _gen_graph(monkeypatch, "quick", frame=8, render="preview chunk")
+    assert [d for d, _, _ in _props(graph)] == ["forward"]
+    (_, tm), = _of(graph, "ComfyProAlpha_TrackMasks")
+    assert tm["inputs"]["start"] == 8
+
+
+def test_graph_backward_pick_on_first_frame_adds_no_pass(pack, monkeypatch):
+    _, graph = _gen_graph(monkeypatch, "quick", frame=0)
+    assert [d for d, _, _ in _props(graph)] == ["forward"]
+
+
+def test_graph_backward_tracks_every_pick_both_ways(pack, monkeypatch):
+    picks = {"target": {"frame": 8, "x": 100, "y": 100}, "adds": [{"frame": 12, "x": 5, "y": 5}],
+             "others": [{"frame": 8, "box": [0.2, 0.5, 0.1, 0.4]}]}
+    _, graph = _gen_graph(monkeypatch, "quick", picks=picks)
+    # target and the excluded person picked on frame 8, the added part on frame 12: each goes back to frame 0
+    assert _props(graph) == [("backward", 8, 16), ("backward", 8, 16), ("backward", 12, 24),
+                             ("forward", 8, 19), ("forward", 8, 19), ("forward", 12, 19)]
+    assert all("masks_back" in n["inputs"] for _, n in _of(graph, "ComfyProAlpha_TrackMasks"))
+
+
+# ------------------------------------------------------------------ v0.6 matte everyone (skip SAM3)
+
+def test_graph_everyone_has_no_sam3_and_mattes_whole_plate(pack, monkeypatch):
+    _, graph = _gen_graph(monkeypatch, "quick", picks={}, skip_sam3=True, overlap_mode=True)
+    kinds = {n["class_type"] for n in graph.values()}
+    assert not {k for k in kinds if "SAM3" in k} and "ComfyProAlpha_Refine" not in kinds
+    assert "ComfyProAlpha_Isolate" not in kinds and "ComfyProAlpha_AttnChunk" not in kinds  # 1 LTX pass, no v12/v13
+    (sid, _), = _of(graph, "ComfyProAlpha_LtxSelection")
+    (_, final), = _of(graph, "ComfyProAlpha_Final")
+    assert final["inputs"]["everyone"] is True and final["inputs"]["selection"] == [sid, 0]
+    assert final["inputs"]["others"] == [sid, 2] and final["inputs"]["first_frame"] == 1001
+    (_, plate), = _of(graph, "ComfyProAlpha_Plate")
+    assert plate["inputs"]["start"] == 0 and plate["inputs"]["count"] == 20
+
+
+def test_graph_everyone_preview_starts_at_scrubber_frame(pack, monkeypatch):
+    _, graph = _gen_graph(monkeypatch, "quick", picks={"frame": 6}, skip_sam3=True, render="preview chunk")
+    (_, plate), = _of(graph, "ComfyProAlpha_Plate")
+    assert plate["inputs"]["start"] == 6 and plate["inputs"]["count"] == 9  # one chunk
+
+
+def test_ltx_selection_is_ltx_solid_area_no_others(pack):
+    ltx = torch.tensor([[[0.0, 0.3, 0.6, 1.0]]], dtype=torch.float16)
+    sel, refined, others = pack.I.LtxSelection.execute(ltx).result
+    assert sel.tolist() == [[[0.0, 0.0, 1.0, 1.0]]] and sel.dtype == ltx.dtype
+    assert torch.equal(refined, ltx) and not others.any()
+
+
+def test_everyone_v7_path_returns_ltx_edges(pack):
+    E = sys.modules["cpa_pack._engine"]
+    yy, xx = np.mgrid[:96, :96]
+    ltx = np.clip((30 - np.hypot(yy - 48, xx - 48)) / 8 + 0.5, 0, 1).astype(np.float32)  # soft disk, 8 px edge
+    alpha = E.hybrid(ltx, (ltx > 0.5).astype(np.float32), ltx)
+    assert np.abs(alpha - ltx).max() < 0.01  # no others: LTX's own soft edge passes through
+
+
+def test_track_backward_input_schema(pack):
+    gen = sys.modules["cpa_pack.node"].ComfyProAlphaGenerator
+    inputs = gen.define_schema().inputs
+    ids = [i.id for i in inputs]
+    inp = {i.id: i for i in inputs}["track_backward"]
+    assert inp.default is True and inp.optional
+    assert ids[-2:] == ["track_backward", "skip_sam3"]  # appended: old widgets_values order kept
+    assert {i.id: i for i in inputs}["skip_sam3"].default is False
 
 
 def test_edge_colour_input_schema(pack):

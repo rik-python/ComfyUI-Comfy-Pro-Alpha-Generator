@@ -296,6 +296,17 @@ class ComfyProAlphaGenerator(io.ComfyNode):
                     "the edges (one extra LTX pass per chunk on the 1080p proxy, plus about 2 s a frame at 4K; "
                     "needs the Clean Plate IC-LoRA). off: the raw plate in the edges, as v0.4.1. The alpha is the "
                     "same in every mode. Saves rgba_ files next to the alpha.")),
+                io.Boolean.Input("track_backward", optional=True, default=True, display_name="track backward from the pick frame",
+                                 tooltip=(
+                    "Full shot: matte the whole plate. Every pick is tracked backward to the first frame as well as "
+                    "forward, so you can pick the subject on any frame where it is clear. Frames before the subject "
+                    "enters get an empty alpha. Off: the shot starts at the pick frame (as before v0.6). The preview "
+                    "always starts at the pick frame.")),
+                io.Boolean.Input("skip_sam3", optional=True, default=False, display_name="matte everyone (skip SAM3)",
+                                 tooltip=(
+                    "Plain LTX alpha-gen: no picks, no SAM3. LTX mattes every main subject in the plate, and you "
+                    "still get the chunked full shot, native 4K edges, edge colour and EXR with plate frame numbers. "
+                    "The preview starts at the scrubber frame. Quality and overlap mode do not apply.")),
             ],
             outputs=[io.Mask.Output("alpha"), io.Image.Output("comp")],
             hidden=[io.Hidden.unique_id, io.Hidden.dynprompt],
@@ -304,7 +315,9 @@ class ComfyProAlphaGenerator(io.ComfyNode):
     @classmethod
     def validate_inputs(cls, picks, **kw):
         import nodes
-        packs = sorted({p for t, p in PACKS.items() if t not in nodes.NODE_CLASS_MAPPINGS})
+        everyone = kw.get("skip_sam3")
+        packs = sorted({p for t, p in PACKS.items() if t not in nodes.NODE_CLASS_MAPPINGS
+                        and not (everyone and p == "ComfyUI-SAM3")})
         if packs:
             return f"Missing node pack(s): {', '.join(packs)}. Install with the Manager (Custom Nodes Manager), then restart ComfyUI."
         problems = [_model_problem(w, kw.get(w)) for w in MODELS
@@ -316,7 +329,7 @@ class ComfyProAlphaGenerator(io.ComfyNode):
             p = json.loads(picks or "{}")
         except ValueError:
             return "picks is not valid JSON"
-        if not p.get("target"):
+        if not p.get("target") and not everyone:
             return "No subject picked: click the subject in the node (anything in the plate, or a detection after Detect)."
         return True
 
@@ -326,7 +339,7 @@ class ComfyProAlphaGenerator(io.ComfyNode):
                 sam3_threshold, fast_attention=True, overlap_mode=False, hair_guide=False,
                 v13_depth=True, hair_radius=4, attn_grow=20, attn_blur=10.0, attn_strength=1.0, occluder_reach=20,
                 limb_cap=90, front_smoothing=3, native_edges=True, edge_colour=EDGE_COLOUR[0],
-                clean_plate_lora=None):
+                clean_plate_lora=None, track_backward=True, skip_sam3=False):
         p = json.loads(picks)
         n_video, H, W = images.shape[:3]
         ltx_model, alpha_lora, video_vae, audio_vae = (_resolve(w, v) for w, v in (
@@ -341,7 +354,9 @@ class ComfyProAlphaGenerator(io.ComfyNode):
         src = cls.hidden.dynprompt.get_node(cls.hidden.unique_id)["inputs"]["images"]
         if p.get("plate") and p["plate"] != plate_fingerprint(images):
             print("[ComfyProAlpha] warning: the plate changed since the subject was picked; picks may be off")
-        start = int(p["target"]["frame"])
+        everyone = bool(skip_sam3)
+        pick = int(p["target"]["frame"]) if not everyone else int(p.get("frame", 0))
+        start = 0 if render == RENDER[0] and (track_backward or everyone) else pick
         count = n_video - start
         L = min(chunk, E.ltx_frames(count) if count >= chunk else 8 * math.ceil((count - 1) / 8) + 1)
         if render == RENDER[1]:
@@ -349,6 +364,8 @@ class ComfyProAlphaGenerator(io.ComfyNode):
         starts = E.chunk_starts(count, L, max(1, L - overlap))
         if len(starts) > 24:
             raise ValueError(f"{count} frames needs {len(starts)} chunks (max 24): lower 'overlap frames' or split the shot")
+        if everyone:  # nobody to isolate or order: plain LTX through the v7 path
+            quality, overlap_mode = V7, False
         best = quality == V12
         prefix = filename_prefix + ("_preview" if render == RENDER[1] else "")
 
@@ -359,19 +376,25 @@ class ComfyProAlphaGenerator(io.ComfyNode):
             native_src = src
             src = g.node("ComfyProAlpha_Proxy", images=native_src).out(0)
             W, H = E.proxy_size(W, H)
-        vid = g.node("ComfyProAlpha_LoadVideo", images=src, fps=fps)
-        sam = g.node("LoadSAM3Model", precision="auto")
+        if not everyone:
+            vid = g.node("ComfyProAlpha_LoadVideo", images=src, fps=fps)
+            sam = g.node("LoadSAM3Model", precision="auto")
 
         last = start + count - 1
 
         def track(mode, frame, **prompt):
-            """One SAM3 object, tracked forward from its prompt frame to the end of the processed range."""
-            seg = g.node("SAM3VideoSegmentation", video=vid.out(0), prompt_mode=mode, frame_idx=int(frame),
+            """One SAM3 object, tracked forward from its prompt frame to the end of the processed range and, with
+            track_backward, backward to the range's start."""
+            frame = int(frame)
+            seg = g.node("SAM3VideoSegmentation", video=vid.out(0), prompt_mode=mode, frame_idx=frame,
                          score_threshold=sam3_threshold, **prompt)
-            prop = g.node("SAM3Propagate", sam3_model_config=sam.out(0), video_state=seg.out(0),
-                          start_frame=int(frame), end_frame=last, direction="forward")
-            return g.node("ComfyProAlpha_TrackMasks", masks=prop.out(0), start=start, count=count,
-                          width=W, height=H).out(0)
+            prop = lambda end, direction: g.node("SAM3Propagate", sam3_model_config=sam.out(0), video_state=seg.out(0),
+                                                 start_frame=frame, end_frame=end, direction=direction).out(0)
+            kw = {"masks": prop(last, "forward")}
+            if track_backward and frame > start:
+                # SAM3 tracks end_frame - start_frame + 1 frames in either direction: this reaches back to `start`
+                kw["masks_back"] = prop(2 * frame - start, "backward")
+            return g.node("ComfyProAlpha_TrackMasks", start=start, count=count, width=W, height=H, **kw).out(0)
 
         def box_track(b):
             cx, cy, w, h = b["box"]
@@ -395,16 +418,18 @@ class ComfyProAlphaGenerator(io.ComfyNode):
                 out = m if out is None else g.node("ComfyProAlpha_MaskMax", a=out, b=m).out(0)
             return out
 
-        # Target from a detection (box) or from a plain click anywhere (SAM3 point prompt, no Detect needed).
-        target = box_track(p["target"]) if "box" in p["target"] else point_track(p["target"])
-        in_range = lambda items: [x for x in items if int(x["frame"]) <= last]  # parts first seen after a preview
-        refine_kw = {k: v for k, v in (("adds", union([point_track(a) for a in in_range(p.get("adds", []))])),
-                                       ("cuts", union([point_track(c) for c in in_range(p.get("cuts", []))])),
-                                       ("others", union([box_track(o) for o in in_range(p.get("others", []))]))) if v is not None}
         plate = g.node("ComfyProAlpha_Plate", images=src, start=start, count=count)
-        ref = g.node("ComfyProAlpha_Refine", plate=plate.out(0), target=target, vitmatte=vitmatte,
-                     erode=erode, dilate=dilate, radius=stabilize_radius, **refine_kw)
-        sel, refined, others = ref.out(0), ref.out(1), ref.out(2)
+        refine_kw = {}
+        if not everyone:
+            # Target from a detection (box) or from a plain click anywhere (SAM3 point prompt, no Detect needed).
+            target = box_track(p["target"]) if "box" in p["target"] else point_track(p["target"])
+            in_range = lambda items: [x for x in items if int(x["frame"]) <= last]  # parts first seen after a preview
+            refine_kw = {k: v for k, v in (("adds", union([point_track(a) for a in in_range(p.get("adds", []))])),
+                                           ("cuts", union([point_track(c) for c in in_range(p.get("cuts", []))])),
+                                           ("others", union([box_track(o) for o in in_range(p.get("others", []))]))) if v is not None}
+            ref = g.node("ComfyProAlpha_Refine", plate=plate.out(0), target=target, vitmatte=vitmatte,
+                         erode=erode, dilate=dilate, radius=stabilize_radius, **refine_kw)
+            sel, refined, others = ref.out(0), ref.out(1), ref.out(2)
 
         # LTX-2.5 alpha-gen stack, settings from kids_ltx_alphagen_1920_49f_API.json
         if ltx_model.lower().endswith(".gguf"):
@@ -449,6 +474,10 @@ class ComfyProAlphaGenerator(io.ComfyNode):
 
         ltx = ltx_pass(src, offset=start)  # full-precision upstream frames, no copy
         final_kw = {}
+        if everyone:
+            ev = g.node("ComfyProAlpha_LtxSelection", ltx=ltx)
+            sel, refined, others = ev.out(0), ev.out(1), ev.out(2)
+            final_kw["everyone"] = True
         v13 = overlap_mode and bool({"others", "cuts"} & refine_kw.keys())
         if overlap_mode and not v13:  # nobody else to order against: v12 does it
             print("[ComfyProAlpha] Overlap (v13): no other subjects picked, using Best (v12)")

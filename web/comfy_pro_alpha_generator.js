@@ -13,7 +13,7 @@ import { api } from "../../scripts/api.js";
 const NODE = "ComfyProAlphaGenerator";
 const LEGACY = "SelectiveMatte";  // old node id: workflows saved before the rename
 const TITLE = "Comfy Pro Alpha Generator";
-const VERSION = "0.5.5";
+const VERSION = "0.6.0";
 const ADVANCED = ["text_encoder", "chunk", "overlap", "fast_attention",
     "seed", "control_after_generate", "erode", "dilate", "near_px", "stabilize_radius", "sam3_threshold"];
 const HIDDEN = ["picks", "render"];
@@ -418,10 +418,8 @@ class Picker {
             "(another person on the same plate) into its own folder (filename_prefix _2, _3...)";
         this.newBtn.onclick = () => this.newSubject();
         this.previewBtn = btn("", "preview", "Preview 49 frames");
-        this.previewBtn.title = "Matte 49 frames from the pick frame (a few minutes) to check the edges first";
         this.previewBtn.onclick = () => this.queue(true);
         this.runBtn = btn("", "run", "Render full shot");
-        this.runBtn.title = "Matte every frame from the pick frame to the end and save the files";
         this.runBtn.onclick = () => this.queue(false);
         this.actions = el("div", "sm-actions");
         this.actions.append(this.clearBtn, this.newBtn, el("span", "sm-sp"), this.runBtn, this.previewBtn);
@@ -457,7 +455,7 @@ class Picker {
 
         HIDDEN.forEach((n) => hideWidget(this.w[n]));
         ADVANCED.forEach((n) => hideWidget(this.w[n]));
-        for (const name of ["overlap_mode", "hair_guide", "edge_colour"]) {
+        for (const name of ["overlap_mode", "hair_guide", "edge_colour", "track_backward", "skip_sam3"]) {
             const w = this.w[name];
             if (!w) continue;
             const cb = w.callback;
@@ -470,10 +468,13 @@ class Picker {
     /** Overlap (v13) replaces the quality setting. Every control stays VISIBLE (hidden ones get missed) and is
      *  greyed out while it has no effect: quality in v13, the v13 options without the switch. */
     syncQuality() {
-        const v13 = !!this.w.overlap_mode?.value;
+        const everyone = this.everyone();  // plain LTX: no picks, so quality, overlap and backward tracking don't apply
+        const v13 = !!this.w.overlap_mode?.value && !everyone;
         const advanced = !this.w[ADVANCED[0]]?.sm_hidden;
         const grey = (w, off) => { if (w) w.disabled = off; };
-        grey(this.w.quality, v13);
+        grey(this.w.quality, v13 || everyone);
+        grey(this.w.overlap_mode, everyone);
+        grey(this.w.track_backward, everyone);
         grey(this.w.v13_depth, !v13);
         grey(this.w.hair_guide, !v13);
         grey(this.w.hair_radius, !(v13 && this.w.hair_guide?.value));
@@ -487,8 +488,16 @@ class Picker {
         const big = !iw || iw > bw || ih > bh;
         grey(this.w.native_edges, !big);
         grey(this.w.clean_plate_lora, this.w.edge_colour?.value !== "perfect");  // v15: only perfect uses it
+        this.runBtn.title = everyone ? "Matte the whole plate with plain LTX (everyone in frame) and save the files"
+            : (this.w.track_backward?.value ?? true)
+            ? "Matte the whole plate (picks are tracked backward and forward) and save the files"
+            : "Matte every frame from the pick frame to the end and save the files";
+        this.previewBtn.title = `Matte 49 frames from the ${everyone ? "scrubber" : "pick"} frame (a few minutes) to check the edges first`;
+        if (this.steps) this.syncUI();  // "matte everyone" needs no subject: enables Preview / Render
         this.fitNode();
     }
+
+    everyone() { return !!this.w.skip_sam3?.value; }
 
     /** Plate frame number of index i (first_frame, e.g. 1001 for VFX plates). */
     num(i) { return (this.info?.first_frame ?? this.w.first_frame?.value ?? 1) + i; }
@@ -611,7 +620,7 @@ class Picker {
 
     /** Show only what the current step needs (first-time users see one next action, never the whole toolbar). */
     syncUI() {
-        const plate = !!(this.info && this.img), subject = !!this.picks.target, result = !!this.result;
+        const plate = !!(this.info && this.img), subject = !!this.picks.target || this.everyone(), result = !!this.result;
         const now = !plate ? "plate" : !subject ? "subject" : "render";
         for (const [k, s] of Object.entries(this.steps)) {
             const done = k === "plate" ? plate : k === "subject" ? subject : result;
@@ -836,7 +845,8 @@ class Picker {
     }
 
     async queue(preview) {
-        if (!this.picks.target) { alert(`${TITLE}: click the subject to matte (anything in the plate, or a match after Find).`); return; }
+        if (this.everyone()) { this.picks.frame = this.frame; this.writePicks(); }  // plain LTX preview starts here
+        else if (!this.picks.target) { alert(`${TITLE}: click the subject to matte (anything in the plate, or a match after Find).`); return; }
         if (this.picks.stale && !confirm("The plate changed after you picked the subject. Run anyway?")) return;
         const r = this.w.render;
         r.value = preview ? "preview chunk" : "full shot";

@@ -149,10 +149,13 @@ class TrackMasks(io.ComfyNode):
         return _schema("ComfyProAlpha_TrackMasks", [
             io.Custom("SAM3_VIDEO_MASKS").Input("masks"), io.Int.Input("start", default=0),
             io.Int.Input("count", default=1), io.Int.Input("width", default=1920), io.Int.Input("height", default=1080),
+            io.Custom("SAM3_VIDEO_MASKS").Input("masks_back", optional=True),
         ], [io.Mask.Output("mask")])
 
     @classmethod
-    def execute(cls, masks, start, count, width, height):
+    def execute(cls, masks, start, count, width, height, masks_back=None):
+        if masks_back:
+            masks = {**masks_back, **masks}  # the backward pass fills the frames before the prompt; forward wins on it
         out = torch.zeros(count, height, width, dtype=torch.float16)
         for t in range(count):
             m = masks.get(str(start + t))
@@ -268,6 +271,20 @@ class Refine(io.ComfyNode):
         # there into a different (equally valid) sample. The ViTMatte edge only feeds the final blend: half is exact enough.
         f32 = lambda a: torch.from_numpy(np.clip(a, 0, 1).astype(np.float32))
         return io.NodeOutput(f32(sel), _half(vit), f32(oth))
+
+
+class LtxSelection(io.ComfyNode):
+    """'matte everyone' (no SAM3): LTX's own matte is the subject. Selection = where LTX is solid, refined = LTX,
+    no others: Final's v7 path then keeps LTX's edges, and the 4K tiles follow LTX's outline."""
+
+    @classmethod
+    def define_schema(cls):
+        return _schema("ComfyProAlpha_LtxSelection", [io.Mask.Input("ltx")],
+                       [io.Mask.Output("selection"), io.Mask.Output("refined"), io.Mask.Output("others")])
+
+    @classmethod
+    def execute(cls, ltx):
+        return io.NodeOutput((ltx > 0.5).to(ltx.dtype), ltx, torch.zeros_like(ltx))
 
 
 # ------------------------------------------------------------------ depth (v13 front/back order)
@@ -789,13 +806,14 @@ class Final(io.ComfyNode):
             io.Image.Input("native_plate", optional=True), io.Int.Input("native_start", default=0, optional=True),
             io.Mask.Input("tiles", optional=True), io.Mask.Input("coverage", optional=True),
             io.Int.Input("tile_count", default=0, optional=True),
+            io.Boolean.Input("everyone", default=False, optional=True),
         ], [io.Mask.Output("alpha"), io.Image.Output("comp"), io.String.Output("info")], output_node=True)
 
     @classmethod
     def execute(cls, plate, ltx, selection, refined, others, near_px, filename_prefix, format, first_frame,
                 save, qc, comp=True, ltx_isolated=None, attn_target=None, attn_others=None, depth=None,
                 hair_guide=False, hair_radius=4, occluder_reach=20, limb_cap=90, front_smoothing=3,
-                native_plate=None, native_start=0, tiles=None, coverage=None, tile_count=0):
+                native_plate=None, native_start=0, tiles=None, coverage=None, tile_count=0, everyone=False):
         p = _rgb8(plate)
         L, S, R, O = _h(ltx), _h(selection), _h(refined), _h(others)
         I = _h(ltx_isolated) if ltx_isolated is not None else None
@@ -812,7 +830,7 @@ class Final(io.ComfyNode):
                 v7 = E.hybrid(f32(L[f]), f32(S[f]), f32(R[f]))
                 alpha[f] = v7 if I is None else E.v12_blend(v7, E.level(f32(I[f]), f32(S[f]), f32(O[f]))[0],
                                                             f32(S[f]), f32(O[f]), near_px)
-            mode = "v12 (best)" if I is not None else "v7 (fast)"
+            mode = "everyone (no SAM3)" if everyone else "v12 (best)" if I is not None else "v7 (fast)"
         # LTX alpha-gen only mattes what it sees as the main subject: a background car or a prop can come out
         # empty. Fall back to the ViTMatte edge wherever LTX does not cover the selection.
         ltx_seen = np.maximum(L, I) if I is not None else L
@@ -982,6 +1000,6 @@ class PartReport(io.ComfyNode):
                                                           "mask": {"filename": name, "subfolder": sub, "type": "temp"}}]})
 
 
-NODES = [Plate, LoadVideo, Frame, PlateProxy, TrackMasks, MaskMax, EmptyPrompt, Refine, Isolate, Depth, ChunkPad, AttnChunk,
+NODES = [Plate, LoadVideo, Frame, PlateProxy, TrackMasks, MaskMax, EmptyPrompt, Refine, LtxSelection, Isolate, Depth, ChunkPad, AttnChunk,
          DecodeAlpha, Stitch, Proxy, NativeIsolate, TileGuide, DecodeStitch, DecodeStitchRGB, TileMerge, NativeEdges, Final, EdgeColour,
          DetectReport, PartReport]
